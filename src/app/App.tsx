@@ -972,7 +972,7 @@ function loadGMaps(cb: () => void) {
   const s = document.createElement("script")
   s.id    = "gantabya-gmaps"
   s.async = true
-  s.src   = `https://maps.googleapis.com/maps/api/js?key=${GMAPS_KEY}&libraries=places&callback=__gmaps_init`
+  s.src   = `https://maps.googleapis.com/maps/api/js?key=${GMAPS_KEY}&libraries=places&callback=__gmaps_init&loading=async`
   s.onerror = () => console.error("[Gantabya] Google Maps script failed to load")
   document.head.appendChild(s)
 }
@@ -1020,9 +1020,10 @@ function RouteMap({ origin, waypoints, viaPoints = [], destination, travelMode, 
   onRoutes?: (routes: RouteAlternative[]) => void
   selectedRouteIndex?: number
 }) {
-  const divRef       = useRef<HTMLDivElement>(null)
-  const mapObj       = useRef<any>(null)
-  const renderersRef = useRef<any[]>([])
+  const divRef        = useRef<HTMLDivElement>(null)
+  const mapObj        = useRef<any>(null)
+  const renderersRef  = useRef<any[]>([])
+  const [zeroResults, setZeroResults] = useState(false)
 
   const clearRenderers = () => {
     renderersRef.current.forEach(r => { try { r.setMap(null) } catch {} })
@@ -1041,6 +1042,7 @@ function RouteMap({ origin, waypoints, viaPoints = [], destination, travelMode, 
     if (!GMAPS_KEY || !divRef.current) return
     let cancelled = false
 
+    setZeroResults(false)
     loadGMaps(() => {
       if (cancelled || !divRef.current) return
       const g = (window as any).google.maps
@@ -1070,7 +1072,11 @@ function RouteMap({ origin, waypoints, viaPoints = [], destination, travelMode, 
         optimizeWaypoints: false,
       }, (result: any, status: string) => {
         if (cancelled) return
-        if (status !== "OK") { console.warn("[Gantabya] Directions:", status); return }
+        if (status !== "OK") {
+          if (status === "ZERO_RESULTS") setZeroResults(true)
+          return
+        }
+        setZeroResults(false)
 
         clearRenderers()
         const routes: any[] = result.routes ?? []
@@ -1101,7 +1107,31 @@ function RouteMap({ origin, waypoints, viaPoints = [], destination, travelMode, 
   }, [origin, destination, travelMode, waypoints.join(","), viaPoints.join(","), isDark])
 
   if (!GMAPS_KEY) return <NoKeyPlaceholder t={t} />
-  return <div ref={divRef} style={{ width: "100%", height: "100%", borderRadius: 8 }} />
+  return (
+    <div style={{ position: "relative", width: "100%", height: "100%" }}>
+      <div ref={divRef} style={{ width: "100%", height: "100%", borderRadius: 8 }} />
+      {zeroResults && (
+        <div style={{
+          position: "absolute", inset: 0, display: "flex", flexDirection: "column",
+          alignItems: "center", justifyContent: "center", gap: 10,
+          background: "rgba(255,255,255,0.88)", backdropFilter: "blur(6px)", borderRadius: 8,
+        }}>
+          <div style={{ fontSize: 28 }}>📍</div>
+          <div style={{ fontSize: 13, fontWeight: 600, color: "#374151" }}>Route not found</div>
+          <div style={{ fontSize: 11, color: "#6B7280", textAlign: "center", maxWidth: 240, lineHeight: 1.5 }}>
+            Google Maps couldn't calculate a road route to <strong>{destination.replace(", Nepal", "")}</strong>.
+            This may be a remote trek or pedestrian-only destination.
+          </div>
+          <button
+            onClick={() => window.open(`https://www.google.com/maps/dir/?api=1&origin=${encodeURIComponent(origin)}&destination=${encodeURIComponent(destination)}&travelmode=walking`, "_blank")}
+            style={{ padding: "7px 16px", borderRadius: 8, border: "none", background: "#185FA5", color: "#fff", fontSize: 11, fontWeight: 600, cursor: "pointer" }}
+          >
+            Try on Google Maps →
+          </button>
+        </div>
+      )}
+    </div>
+  )
 }
 
 // ── ItineraryMap — day activities rendered as a route on a live Google Map ────
@@ -2094,6 +2124,143 @@ function FloatingTripAssistant({ from, dest, itinerary, budget, days, travelMode
 
 // ─── Smart Planner (unified AI destination finder + itinerary builder) ────────
 
+// ─── Interactive map location picker ─────────────────────────────────────────
+
+type PickMode = "origin" | "destination"
+
+function LocationPickerMap({ onOrigin, onDestination, t, isDark }: {
+  onOrigin: (name: string) => void
+  onDestination: (name: string) => void
+  t: Theme; isDark?: boolean
+}) {
+  const divRef      = useRef<HTMLDivElement>(null)
+  const mapObj      = useRef<any>(null)
+  const origMarker  = useRef<any>(null)
+  const destMarker  = useRef<any>(null)
+  const modeRef     = useRef<PickMode>("destination")
+  const [mode, setModeState] = useState<PickMode>("destination")
+  const [status, setStatus]  = useState("")
+
+  const setMode = (m: PickMode) => { modeRef.current = m; setModeState(m) }
+
+  useEffect(() => {
+    if (!GMAPS_KEY || !divRef.current) return
+    loadGMaps(() => {
+      if (!divRef.current) return
+      const g = (window as any).google.maps
+
+      if (!mapObj.current) {
+        mapObj.current = new g.Map(divRef.current, {
+          zoom: 7,
+          center: { lat: 28.3949, lng: 84.124 },
+          styles: isDark ? DARK_STYLES : LIGHT_STYLES,
+          disableDefaultUI: true,
+          zoomControl: true,
+          clickableIcons: false,
+        })
+        g.event.trigger(mapObj.current, "resize")
+
+        mapObj.current.addListener("click", (e: any) => {
+          const lat = e.latLng.lat()
+          const lng = e.latLng.lng()
+          const currentMode = modeRef.current
+
+          setStatus("Getting location…")
+
+          new g.Geocoder().geocode({ location: { lat, lng } }, (results: any[], st: string) => {
+            if (st !== "OK" || !results[0]) { setStatus("Couldn't find that location"); return }
+
+            // Use locality / district / country name for a clean label
+            const name = results[0].address_components
+              ?.slice(0, 3)
+              .map((c: any) => c.long_name)
+              .join(", ") || results[0].formatted_address
+
+            if (currentMode === "origin") {
+              if (origMarker.current) origMarker.current.setMap(null)
+              origMarker.current = new g.Marker({
+                position: { lat, lng }, map: mapObj.current,
+                title: "Starting point",
+                icon: { path: g.SymbolPath.CIRCLE, scale: 9, fillColor: "#185FA5", fillOpacity: 1, strokeColor: "#ffffff", strokeWeight: 2 },
+              })
+              onOrigin(name)
+              setStatus(`✓ Start set: ${name}`)
+            } else {
+              if (destMarker.current) destMarker.current.setMap(null)
+              destMarker.current = new g.Marker({
+                position: { lat, lng }, map: mapObj.current,
+                title: "Destination",
+                icon: { path: g.SymbolPath.CIRCLE, scale: 9, fillColor: "#D85A30", fillOpacity: 1, strokeColor: "#ffffff", strokeWeight: 2 },
+              })
+              onDestination(name)
+              setStatus(`✓ Destination set: ${name}`)
+            }
+
+            // Auto-switch mode after each pick
+            const next: PickMode = currentMode === "destination" ? "origin" : "destination"
+            modeRef.current = next; setModeState(next)
+          })
+        })
+      }
+    })
+  }, [isDark])
+
+  if (!GMAPS_KEY) return (
+    <div style={{ height: 180, borderRadius: 10, background: t.subtle, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, color: t.textFaint, border: `0.5px solid ${t.border}` }}>
+      Add VITE_GOOGLE_MAPS_API_KEY to enable map picker
+    </div>
+  )
+
+  return (
+    <div>
+      {/* Mode selector */}
+      <div style={{ display: "flex", gap: 5, marginBottom: 7 }}>
+        {([
+          { m: "origin" as PickMode, label: "🔵 Set start", ac: t.blue, abg: t.blueLight },
+          { m: "destination" as PickMode, label: "🔴 Set destination", ac: t.orange, abg: t.orangeLight },
+        ]).map(opt => (
+          <button key={opt.m} onClick={() => setMode(opt.m)} style={{
+            flex: 1, padding: "6px 0", borderRadius: 7, fontSize: 11, fontWeight: mode === opt.m ? 700 : 500, cursor: "pointer",
+            border: `0.5px solid ${mode === opt.m ? opt.ac : t.border}`,
+            background: mode === opt.m ? opt.abg : t.surface, color: mode === opt.m ? opt.ac : t.textSub,
+            transition: "all 0.12s",
+          }}>
+            {opt.label}
+          </button>
+        ))}
+      </div>
+
+      {/* Map */}
+      <div style={{ position: "relative" }}>
+        <div ref={divRef} style={{ height: 200, borderRadius: 10, border: `0.5px solid ${t.border}`, overflow: "hidden" }} />
+        {/* Cursor hint overlay */}
+        <div style={{ position: "absolute", top: 7, left: "50%", transform: "translateX(-50%)", background: "rgba(0,0,0,0.6)", borderRadius: 12, padding: "3px 10px", fontSize: 10, color: "#fff", pointerEvents: "none", whiteSpace: "nowrap" }}>
+          Tap to set {mode === "origin" ? "starting point" : "destination"}
+        </div>
+      </div>
+
+      {/* Status */}
+      {status && (
+        <div style={{ fontSize: 10, color: status.startsWith("✓") ? t.green : t.textFaint, marginTop: 5, textAlign: "center" }}>
+          {status}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ── Suggested trip cards shown before destination is chosen ──────────────────
+const SUGGESTED_TRIPS = [
+  { name: "Pokhara",                emoji: "🌊", tag: "Nature & lakes",       cost: "Rs 3,000–6,000/day", season: "Spring & Autumn", days: "2–4 days",   bg: "#EBF2FB" },
+  { name: "Chitwan National Park",  emoji: "🐘", tag: "Wildlife safari",      cost: "Rs 2,000–4,000/day", season: "Winter & Spring", days: "2–3 days",   bg: "#EAF2E0" },
+  { name: "Annapurna Base Camp",    emoji: "🏔", tag: "Trek & adventure",     cost: "Rs 2,500–5,000/day", season: "Spring & Autumn", days: "7–10 days",  bg: "#EBF2FB" },
+  { name: "Lumbini",                emoji: "☮",  tag: "Spiritual & heritage", cost: "Rs 1,500–3,000/day", season: "All seasons",     days: "1–2 days",   bg: "#FBF3E2" },
+  { name: "Kathmandu Valley",       emoji: "🛕", tag: "Culture & history",    cost: "Rs 2,000–5,000/day", season: "All seasons",     days: "2–4 days",   bg: "#FBEEE8" },
+  { name: "Poon Hill",              emoji: "⛅", tag: "Trek & sunrise",       cost: "Rs 1,500–2,500/day", season: "Spring & Autumn", days: "3–4 days",   bg: "#EAF2E0" },
+  { name: "Rara National Park",     emoji: "🏞", tag: "Remote wilderness",    cost: "Rs 4,000–8,000/day", season: "Spring & Autumn", days: "4–6 days",   bg: "#EBF2FB" },
+  { name: "Mustang Kingdom",        emoji: "🏜", tag: "Desert & culture",     cost: "Rs 5,000–10,000/day",season: "Summer",          days: "5–8 days",   bg: "#FBF3E2" },
+]
+
 // Popular stops lookup — keyed by destination keyword
 const POPULAR_STOPS_DB: Record<string, { name: string; emoji: string; note: string }[]> = {
   pokhara:      [{ name:"Bandipur Village",     emoji:"🏘", note:"Hill town" }, { name:"Gorkha Durbar",       emoji:"🏰", note:"Royal palace" }, { name:"Manakamana Temple",   emoji:"🛕", note:"Cable car temple" }, { name:"Mugling",             emoji:"🌊", note:"Riverside stop" }],
@@ -2117,16 +2284,159 @@ function getPopularStops(dest: string): { name: string; emoji: string; note: str
   return POPULAR_STOPS_DB.default
 }
 
+// ── Hotel data for Nepal stopovers ────────────────────────────────────────────
+
+const NEPAL_ROUTE_HOTELS: Record<string, { name: string; phone: string; cost: string; stars: number; mapUrl: string }[]> = {
+  pokhara:    [{ name: "Temple Tree Resort & Spa", phone: "+977-61-465555", cost: "Rs 6,000–15,000", stars: 4, mapUrl: "https://www.google.com/maps/search/Temple+Tree+Resort+Pokhara" }, { name: "Hotel Barahi", phone: "+977-61-465001", cost: "Rs 3,500–8,000", stars: 4, mapUrl: "https://www.google.com/maps/search/Hotel+Barahi+Pokhara" }, { name: "Fish Tail Lodge", phone: "+977-61-465071", cost: "Rs 5,000–12,000", stars: 4, mapUrl: "https://www.google.com/maps/search/Fishtail+Lodge+Pokhara" }],
+  chitwan:    [{ name: "Kasara Resort", phone: "+977-56-580141", cost: "Rs 8,000–20,000", stars: 5, mapUrl: "https://www.google.com/maps/search/Kasara+Resort+Chitwan" }, { name: "Tiger Tops Jungle Lodge", phone: "+977-1-4361500", cost: "Rs 12,000+", stars: 5, mapUrl: "https://www.google.com/maps/search/Tiger+Tops+Chitwan" }, { name: "Hotel Narayani Safari", phone: "+977-56-520016", cost: "Rs 2,000–5,000", stars: 3, mapUrl: "https://www.google.com/maps/search/Hotel+Narayani+Chitwan" }],
+  lumbini:    [{ name: "Hotel Lumbini Garden", phone: "+977-71-580236", cost: "Rs 3,000–8,000", stars: 4, mapUrl: "https://www.google.com/maps/search/Hotel+Lumbini+Garden" }, { name: "Buddha Maya Garden Hotel", phone: "+977-71-580100", cost: "Rs 2,000–5,000", stars: 3, mapUrl: "https://www.google.com/maps/search/Buddha+Maya+Garden+Hotel" }],
+  kathmandu:  [{ name: "Dwarika's Hotel", phone: "+977-1-4479488", cost: "Rs 15,000+", stars: 5, mapUrl: "https://www.google.com/maps/search/Dwarika's+Hotel+Kathmandu" }, { name: "Hyatt Regency Kathmandu", phone: "+977-1-4491234", cost: "Rs 12,000+", stars: 5, mapUrl: "https://www.google.com/maps/search/Hyatt+Regency+Kathmandu" }, { name: "Hotel Yak & Yeti", phone: "+977-1-4248999", cost: "Rs 8,000–20,000", stars: 5, mapUrl: "https://www.google.com/maps/search/Yak+Yeti+Hotel+Kathmandu" }],
+  nagarkot:   [{ name: "Club Himalaya Nagarkot", phone: "+977-11-661234", cost: "Rs 6,000–15,000", stars: 4, mapUrl: "https://www.google.com/maps/search/Club+Himalaya+Nagarkot" }, { name: "The Fort Resort", phone: "+977-11-661869", cost: "Rs 8,000–20,000", stars: 4, mapUrl: "https://www.google.com/maps/search/Fort+Resort+Nagarkot" }],
+  dhulikhel:  [{ name: "Dhulikhel Lodge Resort", phone: "+977-11-561114", cost: "Rs 3,000–8,000", stars: 3, mapUrl: "https://www.google.com/maps/search/Dhulikhel+Lodge+Resort" }, { name: "Namobuddha Resort", phone: "+977-11-490114", cost: "Rs 2,500–6,000", stars: 3, mapUrl: "https://www.google.com/maps/search/Namobuddha+Resort+Nepal" }],
+  mugling:    [{ name: "Hotel Mugling Paradise", phone: "+977-56-420045", cost: "Rs 800–2,000", stars: 2, mapUrl: "https://www.google.com/maps/search/hotel+Mugling+Tanahun+Nepal" }, { name: "Riverside Hotel Mugling", phone: "+977-56-420012", cost: "Rs 600–1,500", stars: 2, mapUrl: "https://www.google.com/maps/search/Riverside+Hotel+Mugling" }],
+  butwal:     [{ name: "Hotel Siddhartha", phone: "+977-71-544111", cost: "Rs 2,000–5,000", stars: 3, mapUrl: "https://www.google.com/maps/search/Hotel+Siddhartha+Butwal" }, { name: "Green Park Hotel", phone: "+977-71-543678", cost: "Rs 1,500–3,500", stars: 3, mapUrl: "https://www.google.com/maps/search/Green+Park+Hotel+Butwal" }],
+  bharatpur:  [{ name: "Hotel Narayani", phone: "+977-56-523536", cost: "Rs 2,500–6,000", stars: 3, mapUrl: "https://www.google.com/maps/search/Hotel+Narayani+Bharatpur" }],
+  bandipur:   [{ name: "Old Inn Bandipur", phone: "+977-65-520136", cost: "Rs 2,000–5,000", stars: 3, mapUrl: "https://www.google.com/maps/search/Old+Inn+Bandipur+Nepal" }],
+  janakpur:   [{ name: "Hotel Rama", phone: "+977-41-520059", cost: "Rs 1,500–3,500", stars: 3, mapUrl: "https://www.google.com/maps/search/Hotel+Rama+Janakpur" }],
+  ilam:       [{ name: "Tea House Inn Ilam", phone: "+977-27-520234", cost: "Rs 800–2,000", stars: 2, mapUrl: "https://www.google.com/maps/search/hotel+Ilam+Nepal" }],
+}
+
+function getHotelsForStop(stopName: string) {
+  const lc = stopName.toLowerCase()
+  for (const [key, hotels] of Object.entries(NEPAL_ROUTE_HOTELS)) {
+    if (lc.includes(key)) return hotels
+  }
+  return [{ name: `Hotels near ${stopName.split(",")[0]}`, phone: "See Google Maps", cost: "Various", stars: 0, mapUrl: `https://www.google.com/maps/search/hotel+${encodeURIComponent(stopName + " Nepal")}` }]
+}
+
+// ── Facilities along the route ────────────────────────────────────────────────
+
+function FacilitiesOnRoute({ from, destination, routeInfo, t }: {
+  from: string; destination: string; routeInfo: RouteInfo; t: Theme
+}) {
+  const distKm = parseFloat(routeInfo.distance) || 0
+  const durMatch = routeInfo.duration.match(/(\d+)h\s*(\d+)?m?/)
+  const durMin = durMatch ? parseInt(durMatch[1] || "0") * 60 + parseInt(durMatch[2] || "0") : 0
+
+  type Fac = { icon: string; label: string; detail: string; note: string; atKm: number; mapUrl: string }
+  const facilities: Fac[] = []
+
+  const q = (s: string) => encodeURIComponent(s)
+  const dest = destination.split(",")[0]
+
+  // Restaurants — always shown
+  facilities.push({
+    icon: "🍽", label: "Restaurants & dhabas",
+    detail: distKm > 60 ? "Plan a meal stop at the midpoint town" : "Roadside tea houses & daal-bhat available",
+    note: "Rs 150–500 / meal",
+    atKm: Math.round(distKm * 0.4) || 5,
+    mapUrl: `https://www.google.com/maps/search/restaurants+${q("en route " + dest + " Nepal")}`,
+  })
+
+  // Petrol — if > 30 km
+  if (distKm > 30) {
+    facilities.push({
+      icon: "⛽", label: "Petrol stations",
+      detail: distKm > 120 ? "Plan 1–2 fuel stops — carry extra for remote stretches" : "Fill up before departure; one tank should suffice",
+      note: "Rs 168–175 / litre",
+      atKm: Math.round(distKm * 0.28) || 10,
+      mapUrl: `https://www.google.com/maps/search/petrol+pump+${q(from + " to " + dest + " Nepal")}`,
+    })
+  }
+
+  // Hotel / lodge — if > 60 km or > 2.5 h
+  if (distKm > 60 || durMin > 150) {
+    facilities.push({
+      icon: "🏨", label: "Hotels & lodges",
+      detail: durMin > 300 ? "Long journey — overnight stop recommended" : "Tea-house lodges available at major towns en route",
+      note: "Rs 800–3,500 / night",
+      atKm: Math.round(distKm * 0.5) || 20,
+      mapUrl: `https://www.google.com/maps/search/hotel+lodge+${q(dest + " Nepal")}`,
+    })
+  }
+
+  // Hospital / clinic — always
+  facilities.push({
+    icon: "🏥", label: "Hospitals & clinics",
+    detail: "Note nearest medical facility before you depart",
+    note: "Nepal emergency: 102",
+    atKm: Math.round(distKm * 0.35) || 8,
+    mapUrl: `https://www.google.com/maps/search/hospital+${q(dest + " Nepal")}`,
+  })
+
+  // ATM — if > 40 km
+  if (distKm > 40) {
+    facilities.push({
+      icon: "🏧", label: "ATMs",
+      detail: "Carry cash — ATMs are scarce beyond district headquarters",
+      note: "Withdraw at your origin city",
+      atKm: Math.round(distKm * 0.15) || 5,
+      mapUrl: `https://www.google.com/maps/search/ATM+bank+${q(dest + " Nepal")}`,
+    })
+  }
+
+  // Pharmacy — if > 80 km
+  if (distKm > 80) {
+    facilities.push({
+      icon: "💊", label: "Pharmacies",
+      detail: "Pack a travel health kit for remote areas",
+      note: "Basic meds available at bazaars",
+      atKm: Math.round(distKm * 0.6) || 30,
+      mapUrl: `https://www.google.com/maps/search/pharmacy+medical+${q(dest + " Nepal")}`,
+    })
+  }
+
+  const ETA_LABEL = durMin < 60 ? `${durMin}m drive` : durMin < 120 ? `${Math.floor(durMin / 60)}h ${durMin % 60}m drive` : `${(durMin / 60).toFixed(1)}h drive`
+
+  return (
+    <div style={{ padding: "12px 16px 4px", borderTop: `0.5px solid ${t.border}` }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+        <span style={{ fontSize: 14 }}>🛣</span>
+        <span style={{ fontSize: 11, fontWeight: 700, color: t.textMid }}>Facilities on this route</span>
+        <span style={{ fontSize: 9, color: t.textFaint, marginLeft: "auto" }}>
+          {routeInfo.distance} · {ETA_LABEL}
+        </span>
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 10 }}>
+        {facilities.map(f => (
+          <div key={f.label} style={{ display: "flex", alignItems: "center", gap: 9, padding: "8px 10px", borderRadius: 9, border: `0.5px solid ${t.border}`, background: t.pageBg }}>
+            <span style={{ fontSize: 20, flexShrink: 0 }}>{f.icon}</span>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontSize: 11, fontWeight: 600, color: t.text }}>{f.label}</div>
+              <div style={{ fontSize: 10, color: t.textSub, marginTop: 1, lineHeight: 1.4 }}>{f.detail}</div>
+              <div style={{ fontSize: 9, color: t.textFaint, marginTop: 2 }}>
+                ~{f.atKm} km from {from.split(",")[0] || "start"} · {f.note}
+              </div>
+            </div>
+            <button
+              onClick={() => window.open(f.mapUrl, "_blank")}
+              style={{ flexShrink: 0, padding: "4px 9px", borderRadius: 6, border: `0.5px solid ${t.blue}`, background: t.blueLight, color: t.blue, fontSize: 10, fontWeight: 600, cursor: "pointer" }}
+            >
+              View
+            </button>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
 function SmartPlannerPage() {
   const { t, isDark } = useT()
 
   // ── Input state ──────────────────────────────────────────────────────────
-  const [destination, setDestination] = useState("")   // "where to?" — asked first
-  const [from,        setFrom]        = useState("")   // starting point — empty by default
-  const [budget,      setBudget]      = useState(8000)
-  const [days,        setDays]        = useState(3)
-  const [purposes,    setPurposes]    = useState<string[]>([])
-  const [addedStops,  setAddedStops]  = useState<string[]>([])  // stops along the route
+  const [destination,    setDestination]    = useState("")   // "where to?" — asked first
+  const [debouncedDest,  setDebouncedDest]  = useState("")   // throttled version for map
+  const [searchQuery,    setSearchQuery]    = useState("")   // free-text in Phase A (does NOT switch phase)
+  const [from,           setFrom]           = useState("")   // starting point — empty by default
+  const [budget,         setBudget]         = useState(8000)
+  const [days,           setDays]           = useState(3)
+  const [purposes,       setPurposes]       = useState<string[]>([])
+  const [addedStops,     setAddedStops]     = useState<string[]>([])  // stops along the route
+  const [departureDate,  setDepartureDate]  = useState("")            // YYYY-MM-DD
+  const [departureTime,  setDepartureTime]  = useState("")            // HH:MM
+  const [showMapPicker,  setShowMapPicker]  = useState(false)   // map picker toggle
+  const [mapFullscreen,  setMapFullscreen]  = useState(false)   // fullscreen map overlay
 
   // ── Phase: input → finding → destinations → planning → itinerary ─────────
   type Phase = "input" | "finding" | "destinations" | "planning" | "itinerary"
@@ -2138,6 +2448,13 @@ function SmartPlannerPage() {
   const [travelMode, setTravelMode] = useState<"driving" | "walking" | "transit">("driving")
   const [mapView, setMapView] = useState(false)
   const itineraryRef = useRef<HTMLDivElement>(null)
+
+  // Debounce destination for map — only fires after 900ms of no typing, min 5 chars
+  useEffect(() => {
+    if (destination.trim().length < 5) { setDebouncedDest(""); return }
+    const id = setTimeout(() => setDebouncedDest(destination.trim()), 900)
+    return () => clearTimeout(id)
+  }, [destination])
 
   function togglePurpose(id: string) {
     setPurposes((p) => p.includes(id) ? p.filter((x) => x !== id) : [...p, id])
@@ -2242,9 +2559,35 @@ function SmartPlannerPage() {
     setDestination("")
     setFrom("")
     setAddedStops([])
+    setSearchQuery("")
+    setDebouncedDest("")
+    setDepartureDate("")
+    setDepartureTime("")
   }
 
   const totalCost = itinerary.reduce((s, d) => s + d.totalCost, 0)
+  const [routeInfo, setRouteInfo] = useState<RouteInfo>({ distance: "—", duration: "—" })
+
+  // Determine what destination to show on the right-panel map
+  const mapDest = (() => {
+    // Use only the place name + Nepal — district names cause ZERO_RESULTS
+    if ((phase === "itinerary" || phase === "planning") && selected) return `${selected.name}, Nepal`
+    if (debouncedDest) {
+      const clean = debouncedDest.replace(/,\s*Nepal$/i, "").trim()
+      return clean + ", Nepal"
+    }
+    if (phase === "destinations" && recommendations[0]) return `${recommendations[0].name}, Nepal`
+    return ""
+  })()
+
+  // Build the Google Maps URL for "Open in Google Maps"
+  const openMapsUrl = phase === "itinerary" && selected
+    ? buildGoogleMapsUrl(from || "Kathmandu", selected, itinerary, travelMode)
+    : `https://www.google.com/maps/dir/?api=1` +
+      `&origin=${encodeURIComponent((from || "Kathmandu") + ", Nepal")}` +
+      `&destination=${encodeURIComponent(mapDest || "Nepal")}` +
+      (addedStops.length ? `&waypoints=${addedStops.map(s => encodeURIComponent(s + ", Nepal")).join("|")}` : "") +
+      `&travelmode=${travelMode}`
   const inS: React.CSSProperties = {
     height: 38, border: `0.5px solid ${t.border}`, borderRadius: 8,
     padding: "0 12px 0 30px", fontSize: 13, color: t.text,
@@ -2298,37 +2641,116 @@ function SmartPlannerPage() {
           </div>
         </div>
 
-        {/* Input form */}
+        {/* ── Phase A: Suggest popular trips before any destination is entered ── */}
+        {!destination && phase === "input" && (
+          <div style={{ padding: "14px 16px 16px" }}>
+            <div style={{ fontSize: 12, fontWeight: 600, color: t.textMid, marginBottom: 10 }}>
+              Popular trips in Nepal 🇳🇵
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 7 }}>
+              {SUGGESTED_TRIPS.map(trip => (
+                <button
+                  key={trip.name}
+                  onClick={() => setDestination(trip.name)}
+                  style={{
+                    display: "flex", flexDirection: "column", alignItems: "flex-start",
+                    padding: "10px 12px", borderRadius: 10, border: `0.5px solid ${t.border}`,
+                    background: trip.bg, cursor: "pointer", textAlign: "left",
+                    transition: "all 0.15s",
+                  }}
+                  onMouseEnter={e => { e.currentTarget.style.transform = "translateY(-1px)"; e.currentTarget.style.boxShadow = "0 4px 12px rgba(0,0,0,0.1)" }}
+                  onMouseLeave={e => { e.currentTarget.style.transform = ""; e.currentTarget.style.boxShadow = "" }}
+                >
+                  <span style={{ fontSize: 22, marginBottom: 4 }}>{trip.emoji}</span>
+                  <div style={{ fontSize: 12, fontWeight: 700, color: t.text, lineHeight: 1.2, marginBottom: 2 }}>{trip.name}</div>
+                  <div style={{ fontSize: 9, color: t.textSub, marginBottom: 4 }}>{trip.tag}</div>
+                  <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
+                    <span style={{ fontSize: 8, color: t.textFaint, background: "rgba(255,255,255,0.7)", borderRadius: 4, padding: "1px 5px" }}>{trip.days}</span>
+                    <span style={{ fontSize: 8, color: t.textFaint, background: "rgba(255,255,255,0.7)", borderRadius: 4, padding: "1px 5px" }}>{trip.season}</span>
+                  </div>
+                </button>
+              ))}
+            </div>
+            <div style={{ marginTop: 12, borderTop: `0.5px solid ${t.border}`, paddingTop: 10 }}>
+              <label style={{ fontSize: 11, fontWeight: 600, color: t.textSub, display: "block", marginBottom: 6, textTransform: "uppercase", letterSpacing: "0.05em" }}>
+                Or type any destination
+              </label>
+              <div style={{ display: "flex", gap: 6 }}>
+                <div style={{ position: "relative", flex: 1 }}>
+                  <MapPin size={13} style={{ position: "absolute", left: 9, top: "50%", transform: "translateY(-50%)", color: t.orange }} />
+                  <input
+                    value={searchQuery}
+                    onChange={e => setSearchQuery(e.target.value)}
+                    onKeyDown={e => {
+                      if (e.key === "Enter" && searchQuery.trim()) {
+                        setDestination(searchQuery.trim())
+                        setSearchQuery("")
+                      }
+                    }}
+                    placeholder="e.g. Pokhara, Ilam, Bandipur…"
+                    style={{ width: "100%", height: 36, border: `0.5px solid ${t.border}`, borderRadius: 8, padding: "0 10px 0 28px", fontSize: 13, color: t.text, background: t.subtle, outline: "none", boxSizing: "border-box" }}
+                  />
+                </div>
+                <button
+                  onClick={() => { if (searchQuery.trim()) { setDestination(searchQuery.trim()); setSearchQuery("") } }}
+                  disabled={!searchQuery.trim()}
+                  style={{
+                    padding: "0 14px", height: 36, borderRadius: 8, border: "none",
+                    background: searchQuery.trim() ? t.blue : t.subtle,
+                    color: searchQuery.trim() ? "#fff" : t.textFaint,
+                    fontSize: 12, fontWeight: 600, cursor: searchQuery.trim() ? "pointer" : "default",
+                    flexShrink: 0, transition: "all 0.15s",
+                  }}
+                >
+                  Go →
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ── Phase B: After destination chosen — show route form ── */}
+        {destination && (
         <div style={{ padding: "16px 20px", borderBottom: `0.5px solid ${t.border}` }}>
           <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
 
-            {/* ── STEP 1: Where to? (asked first, prominent) ── */}
-            <div>
-              <label style={{ fontSize: 11, fontWeight: 600, color: t.textSub, display: "block", marginBottom: 5, textTransform: "uppercase", letterSpacing: "0.05em" }}>
-                🗺 Where would you like to go?
-              </label>
-              <div style={{ position: "relative" }}>
-                <MapPin size={13} style={{ position: "absolute", left: 9, top: "50%", transform: "translateY(-50%)", color: t.orange }} />
-                <input
-                  value={destination}
-                  onChange={e => setDestination(e.target.value)}
-                  placeholder="e.g. Pokhara, Chitwan, Lumbini…"
-                  style={{ ...inS, borderColor: destination ? t.orange + "60" : t.border }}
-                />
+            {/* Selected destination chip + change button */}
+            <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "9px 12px", borderRadius: 10, background: t.blueLight, border: `0.5px solid ${t.blue}30` }}>
+              <span style={{ fontSize: 18 }}>
+                {SUGGESTED_TRIPS.find(t => t.name === destination)?.emoji || "📍"}
+              </span>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontSize: 12, fontWeight: 700, color: t.blue }}>{destination}</div>
+                <div style={{ fontSize: 10, color: t.blue, opacity: 0.7 }}>
+                  {SUGGESTED_TRIPS.find(tt => tt.name === destination)?.tag || "Custom destination"}
+                </div>
               </div>
+              <button
+                onClick={() => { setDestination(""); setDebouncedDest(""); setAddedStops([]) }}
+                style={{ fontSize: 10, color: t.blue, background: "rgba(24,95,165,0.12)", border: "none", borderRadius: 5, padding: "3px 9px", cursor: "pointer" }}
+              >
+                Change
+              </button>
             </div>
 
-            {/* ── Mini route preview map (shown when destination is typed) ── */}
-            {destination.trim().length > 2 && (
+            {/* ── Interactive map picker (kept for "Pick on map" in Starting from) ── */}
+            {showMapPicker && (
+              <LocationPickerMap
+                onOrigin={(name) => setFrom(name)}
+                onDestination={(name) => setDestination(name)}
+                t={t}
+                isDark={isDark}
+              />
+            )}
+
+            {/* ── Mini route preview map (debounced: fires 900ms after typing stops, min 5 chars) ── */}
+            {!showMapPicker && debouncedDest.length >= 5 && (
               <div style={{ borderRadius: 10, overflow: "hidden", border: `0.5px solid ${t.border}`, position: "relative" }}>
                 <div style={{ height: 160 }}>
                   <RouteMap
                     origin={from.trim() || "Kathmandu, Nepal"}
                     waypoints={addedStops.filter(Boolean)}
-                    viaPoints={getPopularStops(destination)
-                      .filter(s => !addedStops.includes(s.name))
-                      .map(s => s.name)}
-                    destination={destination.trim() + ", Nepal"}
+                    destination={debouncedDest + ", Nepal"}
                     travelMode="driving"
                     isDark={isDark}
                     t={t}
@@ -2336,7 +2758,7 @@ function SmartPlannerPage() {
                 </div>
                 {/* Map label */}
                 <div style={{ position: "absolute", top: 6, left: 6, background: "rgba(0,0,0,0.55)", borderRadius: 5, padding: "2px 7px", fontSize: 9, color: "#fff", backdropFilter: "blur(2px)" }}>
-                  {from.trim() || "Kathmandu"} → {destination.trim()}
+                  {from.trim() || "Kathmandu"} → {debouncedDest}
                 </div>
               </div>
             )}
@@ -2396,6 +2818,175 @@ function SmartPlannerPage() {
                 <input value={from} onChange={(e) => setFrom(e.target.value)} placeholder="Your city or location" style={inS} />
               </div>
             </div>
+
+            {/* ── Departure date + time ── */}
+            <div>
+              <label style={{ fontSize: 11, fontWeight: 600, color: t.textSub, display: "block", marginBottom: 5, textTransform: "uppercase", letterSpacing: "0.05em" }}>
+                🕐 Departure date & time
+              </label>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                <input
+                  type="date"
+                  value={departureDate}
+                  onChange={e => setDepartureDate(e.target.value)}
+                  min={new Date().toISOString().split("T")[0]}
+                  style={{ ...inS, padding: "0 10px", cursor: "pointer" }}
+                />
+                <input
+                  type="time"
+                  value={departureTime}
+                  onChange={e => setDepartureTime(e.target.value)}
+                  style={{ ...inS, padding: "0 10px", cursor: "pointer" }}
+                />
+              </div>
+              {departureDate && departureTime && (
+                <div style={{ fontSize: 10, color: t.textFaint, marginTop: 4 }}>
+                  Departing {new Date(departureDate + "T" + departureTime).toLocaleDateString("en-US", { weekday: "long", month: "short", day: "numeric" })} at {departureTime}
+                </div>
+              )}
+            </div>
+
+            {/* ── Stops along the route with ETAs ── */}
+            {addedStops.length > 0 && (() => {
+              const durMatch = routeInfo.duration.match(/(\d+)h\s*(\d+)?m?/)
+              const totalDurMin = durMatch ? parseInt(durMatch[1] || "0") * 60 + parseInt(durMatch[2] || "0") : 0
+              const hasTime = !!(departureDate && departureTime && totalDurMin)
+              const baseDate = hasTime ? new Date(departureDate + "T" + departureTime) : null
+
+              // Hint when stops added but time not entered yet
+              if (!hasTime && (!departureDate || !departureTime)) {
+                return (
+                  <div style={{ padding: "8px 10px", borderRadius: 8, background: t.amberLight, border: `0.5px solid ${t.amber}30`, fontSize: 11, color: t.amber, display: "flex", alignItems: "center", gap: 6 }}>
+                    <span style={{ fontSize: 14 }}>💡</span>
+                    Enter departure date & time above to see estimated arrival at each stop and get hotel suggestions.
+                  </div>
+                )
+              }
+
+              return (
+                <div>
+                  <div style={{ fontSize: 10, fontWeight: 600, color: t.textSub, textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 6 }}>
+                    Route stops ({addedStops.length})
+                  </div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                    {addedStops.map((stop, i) => {
+                      const fraction = (i + 1) / (addedStops.length + 1)
+                      const eta = hasTime && baseDate ? new Date(baseDate.getTime() + fraction * totalDurMin * 60 * 1000) : null
+                      const etaStr = eta ? eta.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" }) : null
+                      const needsHotel = eta ? (eta.getHours() >= 19 || eta.getHours() < 6) : false
+                      const hotels = needsHotel ? getHotelsForStop(stop) : []
+
+                      return (
+                        <div key={`route-stop-${i}`}>
+                          <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "7px 10px", borderRadius: 8, background: needsHotel ? "#FBF3E2" : t.pageBg, border: `0.5px solid ${needsHotel ? "#BA751730" : t.border}` }}>
+                            <div style={{ width: 20, height: 20, borderRadius: "50%", background: t.green, color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 10, fontWeight: 700, flexShrink: 0 }}>
+                              {i + 1}
+                            </div>
+                            <div style={{ flex: 1 }}>
+                              <div style={{ fontSize: 11, fontWeight: 600, color: t.text }}>{stop.split(",")[0]}</div>
+                              {etaStr && (
+                                <div style={{ fontSize: 10, color: needsHotel ? "#BA7517" : t.textSub, marginTop: 1 }}>
+                                  {needsHotel ? "🌙 ETA " : "🕐 ETA "}{etaStr}
+                                  {needsHotel && " — hotel stop recommended"}
+                                </div>
+                              )}
+                            </div>
+                            <button
+                              onClick={() => setAddedStops(s => s.filter((_, idx) => idx !== i))}
+                              style={{ width: 20, height: 20, borderRadius: "50%", border: `0.5px solid ${t.border}`, background: t.surface, color: t.textFaint, cursor: "pointer", fontSize: 12, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}
+                            >
+                              ×
+                            </button>
+                          </div>
+
+                          {/* Hotel suggestions when overnight stop needed */}
+                          {needsHotel && hotels.length > 0 && (
+                            <div style={{ margin: "4px 0 0 28px", padding: "8px 10px", background: "#FBF3E2", borderRadius: "0 0 8px 8px", border: `0.5px solid #BA751730`, borderTop: "none" }}>
+                              <div style={{ fontSize: 9, fontWeight: 700, color: "#BA7517", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 6 }}>
+                                🏨 Hotels at {stop.split(",")[0]}
+                              </div>
+                              <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+                                {hotels.slice(0, 2).map(hotel => (
+                                  <div key={hotel.name} style={{ background: "#ffffff", borderRadius: 7, padding: "7px 9px", border: "0.5px solid #BA751720" }}>
+                                    <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 6 }}>
+                                      <div style={{ flex: 1 }}>
+                                        <div style={{ fontSize: 11, fontWeight: 600, color: t.text }}>
+                                          {hotel.stars > 0 && "★".repeat(hotel.stars) + " "}
+                                          {hotel.name}
+                                        </div>
+                                        <div style={{ fontSize: 10, color: t.textSub, marginTop: 1 }}>{hotel.cost}</div>
+                                        <div style={{ display: "flex", alignItems: "center", gap: 4, marginTop: 3 }}>
+                                          <span style={{ fontSize: 10 }}>📞</span>
+                                          <span style={{ fontSize: 10, color: t.blue, fontWeight: 500 }}>{hotel.phone}</span>
+                                        </div>
+                                      </div>
+                                      <button
+                                        onClick={() => window.open(hotel.mapUrl, "_blank")}
+                                        style={{ flexShrink: 0, padding: "4px 8px", borderRadius: 6, border: `0.5px solid ${t.blue}`, background: t.blueLight, color: t.blue, fontSize: 9, fontWeight: 700, cursor: "pointer", whiteSpace: "nowrap" }}
+                                      >
+                                        View on Maps
+                                      </button>
+                                    </div>
+                                  </div>
+                                ))}
+                                <button
+                                  onClick={() => window.open(`https://www.google.com/maps/search/hotels+${encodeURIComponent(stop + " Nepal")}`, "_blank")}
+                                  style={{ fontSize: 9, color: t.blue, background: "transparent", border: "none", cursor: "pointer", textDecoration: "underline", textAlign: "left", padding: 0 }}
+                                >
+                                  See all hotels near {stop.split(",")[0]} →
+                                </button>
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      )
+                    })}
+                  </div>
+                </div>
+              )
+            })()}
+
+            {/* ── Destination hotel suggestion (when ETA at final destination is late) ── */}
+            {destination && departureDate && departureTime && routeInfo.duration !== "—" && (() => {
+              const durMatch = routeInfo.duration.match(/(\d+)h\s*(\d+)?m?/)
+              const totalDurMin = durMatch ? parseInt(durMatch[1] || "0") * 60 + parseInt(durMatch[2] || "0") : 0
+              if (!totalDurMin) return null
+              const destEta = new Date(new Date(departureDate + "T" + departureTime).getTime() + totalDurMin * 60 * 1000)
+              const destHour = destEta.getHours()
+              const needsHotel = destHour >= 18 || destHour < 6
+              if (!needsHotel) return null
+              const destHotels = getHotelsForStop(destination)
+              const etaStr = destEta.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" })
+              return (
+                <div style={{ borderRadius: 10, background: "#EBF2FB", border: `0.5px solid ${t.blue}30`, padding: "10px 12px" }}>
+                  <div style={{ fontSize: 11, fontWeight: 700, color: t.blue, marginBottom: 6 }}>
+                    🏨 You'll arrive in {destination.split(",")[0]} around {etaStr} — book a hotel
+                  </div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+                    {destHotels.slice(0, 2).map(hotel => (
+                      <div key={hotel.name} style={{ background: "#fff", borderRadius: 8, padding: "8px 10px", border: `0.5px solid ${t.blue}20`, display: "flex", alignItems: "flex-start", gap: 8 }}>
+                        <div style={{ flex: 1 }}>
+                          <div style={{ fontSize: 11, fontWeight: 600, color: t.text }}>
+                            {hotel.stars > 0 ? "★".repeat(hotel.stars) + " " : ""}{hotel.name}
+                          </div>
+                          <div style={{ fontSize: 10, color: t.textSub, marginTop: 1 }}>{hotel.cost}</div>
+                          <div style={{ display: "flex", alignItems: "center", gap: 4, marginTop: 3 }}>
+                            <span style={{ fontSize: 11 }}>📞</span>
+                            <span style={{ fontSize: 10, color: t.blue, fontWeight: 500 }}>{hotel.phone}</span>
+                          </div>
+                        </div>
+                        <button onClick={() => window.open(hotel.mapUrl, "_blank")} style={{ flexShrink: 0, padding: "5px 10px", borderRadius: 6, border: "none", background: t.blue, color: "#fff", fontSize: 10, fontWeight: 700, cursor: "pointer" }}>
+                          View on Maps
+                        </button>
+                      </div>
+                    ))}
+                    <button onClick={() => window.open(`https://www.google.com/maps/search/hotels+${encodeURIComponent(destination + " Nepal")}`, "_blank")} style={{ fontSize: 10, color: t.blue, background: "transparent", border: "none", cursor: "pointer", textDecoration: "underline", textAlign: "left", padding: 0 }}>
+                      See all hotels in {destination.split(",")[0]} →
+                    </button>
+                  </div>
+                </div>
+              )
+            })()}
 
             {/* Budget + Days */}
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
@@ -2474,6 +3065,17 @@ function SmartPlannerPage() {
             </button>
           </div>
         </div>
+        )} {/* end destination && */}
+
+        {/* Facilities on route — appears once Google Maps calculates distance/time */}
+        {destination && routeInfo.distance !== "—" && (
+          <FacilitiesOnRoute
+            from={from || "Kathmandu"}
+            destination={destination}
+            routeInfo={routeInfo}
+            t={t}
+          />
+        )}
 
         {/* Recommendation cards */}
         {(phase === "destinations" || phase === "planning" || phase === "itinerary") && (
@@ -2530,256 +3132,251 @@ function SmartPlannerPage() {
         )}
       </div>
 
-      {/* ── Right panel: itinerary + ML analysis ─────────────────────────── */}
-      <div style={{ flex: 1, overflowY: "auto", padding: "24px 28px", minWidth: 0 }}>
-
-        {/* Empty state */}
-        {(phase === "input" || phase === "finding") && (
-          <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", height: "70vh", gap: 16, textAlign: "center" }}>
-            <div style={{ fontSize: 48 }}>🗺</div>
-            <div style={{ fontSize: 16, fontWeight: 600, color: t.textMid }}>
-              {phase === "finding" ? "Analysing destinations…" : "Set your preferences to begin"}
+      {/* ── Fullscreen map overlay ────────────────────────────────────────── */}
+      {mapFullscreen && (
+        <div style={{ position: "fixed", inset: 0, zIndex: 500, display: "flex", flexDirection: "column", background: t.surface }}>
+          {/* Header */}
+          <div style={{ height: 48, display: "flex", alignItems: "center", gap: 10, padding: "0 18px", borderBottom: `0.5px solid ${t.border}`, flexShrink: 0 }}>
+            <span style={{ fontSize: 16 }}>🗺</span>
+            <div>
+              <div style={{ fontSize: 13, fontWeight: 700, color: t.text }}>Nepal — Interactive Map</div>
+              <div style={{ fontSize: 10, color: t.textSub }}>Tap to set starting point or destination · auto-switches mode after each pick</div>
             </div>
-            <div style={{ fontSize: 13, color: t.textSub, maxWidth: 320, lineHeight: 1.6 }}>
-              {phase === "finding"
-                ? "Your ML model is ranking Bagmati Province destinations based on your budget, interests, and trip length."
-                : "Fill in your starting point, budget, number of days, and travel interests. The AI will find matching destinations and build your day-by-day itinerary."}
+            <button
+              onClick={() => setMapFullscreen(false)}
+              style={{ marginLeft: "auto", padding: "5px 14px", borderRadius: 8, border: `0.5px solid ${t.border}`, background: t.subtle, color: t.textMid, fontSize: 12, fontWeight: 600, cursor: "pointer" }}
+            >
+              ✕ Close
+            </button>
+          </div>
+          {/* Full map */}
+          <div style={{ flex: 1, overflow: "hidden" }}>
+            <LocationPickerMap onOrigin={setFrom} onDestination={setDestination} t={t} isDark={isDark} />
+          </div>
+          {/* Bottom status strip */}
+          {(from || destination) && (
+            <div style={{ height: 44, display: "flex", alignItems: "center", gap: 16, padding: "0 18px", borderTop: `0.5px solid ${t.border}`, background: t.surface, flexShrink: 0 }}>
+              {from && <div style={{ display: "flex", alignItems: "center", gap: 6 }}><div style={{ width: 8, height: 8, borderRadius: "50%", background: t.blue }} /><span style={{ fontSize: 12, color: t.text }}>{from}</span></div>}
+              {from && destination && <ArrowRight size={12} color={t.textFaint} />}
+              {destination && <div style={{ display: "flex", alignItems: "center", gap: 6 }}><div style={{ width: 8, height: 8, borderRadius: "50%", background: t.orange }} /><span style={{ fontSize: 12, color: t.text }}>{destination}</span></div>}
+              <button onClick={() => setMapFullscreen(false)} style={{ marginLeft: "auto", padding: "5px 14px", borderRadius: 7, border: "none", background: t.blue, color: "#fff", fontSize: 11, fontWeight: 600, cursor: "pointer" }}>
+                Done →
+              </button>
             </div>
-            {phase === "finding" && (
-              <Loader2 size={24} color={t.blue} style={{ animation: "spin 1s linear infinite" }} />
-            )}
-          </div>
-        )}
+          )}
+        </div>
+      )}
 
-        {/* Destination selected, building itinerary */}
-        {phase === "planning" && selected && (
-          <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", height: "60vh", gap: 14, textAlign: "center" }}>
-            <div style={{ fontSize: 40 }}>{selected.emoji}</div>
-            <div style={{ fontSize: 16, fontWeight: 600, color: t.text }}>{selected.name}</div>
-            <div style={{ fontSize: 13, color: t.textSub }}>Building your {days}-day itinerary…</div>
-            <Loader2 size={22} color={t.blue} style={{ animation: "spin 1s linear infinite" }} />
-          </div>
-        )}
-
-        {/* Itinerary */}
-        {phase === "itinerary" && selected && itinerary.length > 0 && (
-          <div ref={itineraryRef}>
+      {/* ── Itinerary in left panel (shown below recommendations) ──────────── */}
+      {phase === "itinerary" && selected && itinerary.length > 0 && (() => {
+        const day = itinerary[activeDay]
+        return (
+          <div style={{ borderTop: `0.5px solid ${t.border}`, padding: "14px 16px", background: t.surface, overflowY: "auto", maxHeight: "55vh" }}>
             {/* Destination header */}
-            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 14 }}>
-              <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-                <div style={{ fontSize: 32 }}>{selected.emoji}</div>
-                <div>
-                  <h1 style={{ fontSize: 20, fontWeight: 700, color: t.text, margin: 0 }}>{selected.name}</h1>
-                  <div style={{ fontSize: 12, color: t.textSub, marginTop: 2 }}>
-                    {days} day{days !== 1 ? "s" : ""} · Rs {budget.toLocaleString()} budget · from {from}
-                  </div>
-                </div>
-              </div>
-              <div style={{ display: "flex", gap: 6 }}>
-                {selected.category.map((c) => (
-                  <span key={c} style={{ fontSize: 10, fontWeight: 500, color: t.blue, background: t.blueLight, borderRadius: 5, padding: "3px 8px", textTransform: "capitalize" }}>{c}</span>
-                ))}
-              </div>
-            </div>
-
-            {/* ── Google Maps navigation bar ─────────────────────────────── */}
-            <div style={{
-              background: `linear-gradient(135deg, ${t.blue} 0%, #1A7ACC 100%)`,
-              borderRadius: 12, padding: "14px 18px", marginBottom: 18,
-              display: "flex", alignItems: "center", gap: 14,
-            }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
+              <span style={{ fontSize: 22 }}>{selected.emoji}</span>
               <div style={{ flex: 1 }}>
-                <div style={{ fontSize: 13, fontWeight: 700, color: "#fff", marginBottom: 3 }}>
-                  🗺 Ready to navigate your trip?
-                </div>
-                <div style={{ fontSize: 11, color: "rgba(255,255,255,0.75)", lineHeight: 1.4 }}>
-                  {from} → {itinerary.flatMap(d => d.activities).filter(a => !["🚌","🏠","🏨"].includes(a.icon)).length} stops → {selected.name}
-                </div>
-                {/* Travel mode selector */}
-                <div style={{ display: "flex", gap: 5, marginTop: 8 }}>
-                  {([
-                    { id: "driving", icon: "🚗", label: "Drive" },
-                    { id: "walking", icon: "🚶", label: "Walk" },
-                    { id: "transit", icon: "🚌", label: "Transit" },
-                  ] as const).map(m => (
-                    <button key={m.id} onClick={() => setTravelMode(m.id)} style={{
-                      padding: "3px 10px", borderRadius: 20, border: `1px solid ${travelMode === m.id ? "#fff" : "rgba(255,255,255,0.35)"}`,
-                      background: travelMode === m.id ? "rgba(255,255,255,0.22)" : "transparent",
-                      color: "#fff", fontSize: 11, fontWeight: travelMode === m.id ? 700 : 400,
-                      cursor: "pointer", display: "flex", alignItems: "center", gap: 4,
-                    }}>
-                      {m.icon} {m.label}
-                    </button>
-                  ))}
-                </div>
+                <div style={{ fontSize: 13, fontWeight: 700, color: t.text }}>{selected.name}</div>
+                <div style={{ fontSize: 10, color: t.textSub }}>{days} days · Rs {budget.toLocaleString()} · from {from || "Kathmandu"}</div>
               </div>
-              <div style={{ display: "flex", flexDirection: "column", gap: 6, flexShrink: 0 }}>
-                {/* Full itinerary button */}
-                <button
-                  onClick={() => handleOpenMaps(travelMode)}
-                  style={{
-                    padding: "9px 16px", borderRadius: 9, border: "none",
-                    background: "#ffffff", color: t.blue,
-                    fontSize: 12, fontWeight: 700, cursor: "pointer",
-                    display: "flex", alignItems: "center", gap: 6, whiteSpace: "nowrap",
-                  }}
-                >
-                  <span>🗺</span> Open full trip in Google Maps
-                </button>
-                {/* Per-day buttons */}
-                <div style={{ display: "flex", gap: 4 }}>
-                  {itinerary.map((d, i) => (
-                    <button key={`gm-day-${d.day}`} onClick={() => handleOpenMaps(travelMode, i)} style={{
-                      flex: 1, padding: "5px 0", borderRadius: 7,
-                      border: "1px solid rgba(255,255,255,0.35)", background: "rgba(255,255,255,0.12)",
-                      color: "#fff", fontSize: 10, fontWeight: 600, cursor: "pointer",
-                    }}>
-                      Day {d.day}
-                    </button>
-                  ))}
-                </div>
-              </div>
+              <button onClick={handleReset} style={{ fontSize: 10, color: t.textSub, background: t.subtle, border: `0.5px solid ${t.border}`, borderRadius: 5, padding: "3px 8px", cursor: "pointer" }}>
+                ← New trip
+              </button>
             </div>
 
-            {/* Day tabs + view toggle */}
-            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 14, gap: 10 }}>
-              <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                {itinerary.map((d, i) => (
-                  <button key={`day-${d.day}`} onClick={() => setActiveDay(i)} style={{
-                    padding: "6px 14px", borderRadius: 8,
-                    border: `0.5px solid ${activeDay === i ? t.blue : t.border}`,
-                    background: activeDay === i ? t.blue : t.surface,
-                    color: activeDay === i ? "#fff" : t.textSub,
-                    fontSize: 12, fontWeight: 600, cursor: "pointer", transition: "all 0.12s",
-                  }}>
-                    Day {d.day}
-                  </button>
-                ))}
-              </div>
-              {/* View toggle */}
-              <div style={{ display: "flex", background: t.subtle, border: `0.5px solid ${t.border}`, borderRadius: 8, padding: 3, gap: 2, flexShrink: 0 }}>
-                {[{ label: "📋 Itinerary", val: false }, { label: "🗺 Map view", val: true }].map(opt => (
-                  <button key={String(opt.val)} onClick={() => setMapView(opt.val)} style={{
-                    padding: "5px 12px", borderRadius: 6, border: "none", fontSize: 11, fontWeight: 600,
-                    cursor: "pointer", transition: "all 0.12s",
-                    background: mapView === opt.val ? t.blue : "transparent",
-                    color: mapView === opt.val ? "#fff" : t.textSub,
-                  }}>
-                    {opt.label}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            {/* Map view — Google Maps with day activities */}
-            {mapView && (
-              <div style={{ position: "relative", height: 440, marginBottom: 16, borderRadius: 12, overflow: "hidden", border: `0.5px solid ${t.border}` }}>
-                <ItineraryMap
-                  dest={selected} itinerary={itinerary}
-                  activeDay={activeDay} from={from}
-                  isDark={isDark} t={t}
-                />
-                {/* Mini navigation overlay */}
-                <div style={{
-                  position: "absolute", bottom: 14, right: 14, zIndex: 10,
-                  background: t.surface, border: `0.5px solid ${t.border}`,
-                  borderRadius: 10, padding: "10px 14px", minWidth: 220,
-                  boxShadow: "0 4px 16px rgba(0,0,0,0.14)",
+            {/* Day tabs */}
+            <div style={{ display: "flex", gap: 4, marginBottom: 12, flexWrap: "wrap" }}>
+              {itinerary.map((d, i) => (
+                <button key={`lt-day-${d.day}`} onClick={() => setActiveDay(i)} style={{
+                  padding: "4px 12px", borderRadius: 7, fontSize: 11, fontWeight: 600, cursor: "pointer",
+                  border: `0.5px solid ${activeDay === i ? t.blue : t.border}`,
+                  background: activeDay === i ? t.blue : t.surface,
+                  color: activeDay === i ? "#fff" : t.textSub,
                 }}>
-                  <div style={{ fontSize: 11, fontWeight: 700, color: t.text, marginBottom: 6 }}>
-                    🗺 Day {activeDay + 1} navigation
-                  </div>
-                  <div style={{ fontSize: 10, color: t.textSub, marginBottom: 8 }}>
-                    {from} → {selected.name}
-                  </div>
-                  <div style={{ display: "flex", gap: 4, marginBottom: 8 }}>
-                    {([{v:"driving",e:"🚗"},{v:"walking",e:"🚶"},{v:"transit",e:"🚌"}] as const).map(m => (
-                      <button key={m.v} onClick={() => setTravelMode(m.v as any)} style={{
-                        flex:1, padding:"4px 0", borderRadius:6, border:`0.5px solid ${travelMode===m.v ? t.blue : t.border}`,
-                        background: travelMode===m.v ? t.blueLight : "transparent",
-                        color: travelMode===m.v ? t.blue : t.textSub, fontSize:13, cursor:"pointer",
-                      }}>{m.e}</button>
-                    ))}
-                  </div>
-                  <button
-                    onClick={() => handleOpenMaps(travelMode, activeDay)}
-                    style={{
-                      width:"100%", padding:"7px 0", borderRadius:8, border:"none",
-                      background: t.blue, color:"#fff", fontSize:11, fontWeight:700, cursor:"pointer",
-                    }}
-                  >
-                    Open Day {activeDay+1} in Google Maps →
-                  </button>
+                  Day {d.day}
+                </button>
+              ))}
+            </div>
+
+            {/* Active day activities */}
+            {day && (
+              <div style={{ background: t.pageBg, borderRadius: 10, padding: "10px 12px", marginBottom: 10 }}>
+                <div style={{ fontSize: 11, fontWeight: 600, color: t.textMid, marginBottom: 8 }}>{day.theme}</div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
+                  {day.activities.map((act, ai) => (
+                    <div key={`la-${ai}`} style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
+                      <span style={{ fontSize: 14 }}>{act.icon}</span>
+                      <div style={{ flex: 1 }}>
+                        <div style={{ display: "flex", alignItems: "baseline", gap: 6 }}>
+                          <span style={{ fontSize: 9, color: t.textFaint, minWidth: 32 }}>{act.time}</span>
+                          <span style={{ fontSize: 11, fontWeight: 500, color: t.text }}>{act.title}</span>
+                        </div>
+                        <div style={{ fontSize: 10, color: t.textSub, paddingLeft: 38 }}>{act.note}</div>
+                      </div>
+                      {act.cost > 0 && <span style={{ fontSize: 10, color: t.textSub, flexShrink: 0 }}>Rs {act.cost.toLocaleString()}</span>}
+                    </div>
+                  ))}
                 </div>
               </div>
             )}
 
-            {/* Active day card — itinerary view only */}
-            {!mapView && itinerary[activeDay] && (() => {
-              const day = itinerary[activeDay]
-              return (
-                <Card style={{ marginBottom: 16 }}>
-                  <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 16 }}>
-                    <div style={{ background: t.blue, color: "#fff", borderRadius: 8, padding: "4px 12px", fontSize: 12, fontWeight: 700 }}>Day {day.day}</div>
-                    <span style={{ fontSize: 13, fontWeight: 600, color: t.text }}>{day.theme}</span>
-                    <span style={{ marginLeft: "auto", fontSize: 12, fontWeight: 600, color: t.blue }}>Rs {day.totalCost.toLocaleString()} est.</span>
-                  </div>
-                  <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-                    {day.activities.map((act, ai) => (
-                      <div key={`act-${ai}`} style={{ display: "flex", gap: 12, alignItems: "flex-start", padding: "8px 0", borderBottom: ai < day.activities.length - 1 ? `0.5px solid ${t.border}` : "none" }}>
-                        <div style={{ fontSize: 18, lineHeight: 1, paddingTop: 1 }}>{act.icon}</div>
-                        <div style={{ flex: 1 }}>
-                          <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
-                            <span style={{ fontSize: 10, fontWeight: 600, color: t.textFaint, minWidth: 38 }}>{act.time}</span>
-                            <span style={{ fontSize: 13, fontWeight: 500, color: t.text }}>{act.title}</span>
-                          </div>
-                          <div style={{ fontSize: 11, color: t.textSub, marginTop: 2, paddingLeft: 46 }}>{act.note}</div>
-                        </div>
-                        {act.cost > 0 && (
-                          <div style={{ fontSize: 11, fontWeight: 600, color: t.textSub, whiteSpace: "nowrap", flexShrink: 0 }}>
-                            Rs {act.cost.toLocaleString()}
-                          </div>
-                        )}
-                      </div>
-                    ))}
-                  </div>
-                </Card>
-              )
-            })()}
+            {/* Cost summary */}
+            <div style={{ background: t.blueLight, borderRadius: 10, padding: "10px 12px", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+              <div style={{ fontSize: 11, color: t.blue }}>
+                {budget >= totalCost ? `✓ Within budget — Rs ${(budget - totalCost).toLocaleString()} remaining` : `⚠ Rs ${(totalCost - budget).toLocaleString()} over budget`}
+              </div>
+              <div style={{ textAlign: "right" }}>
+                <div style={{ fontSize: 9, color: t.blue, opacity: 0.7 }}>Total est.</div>
+                <div style={{ fontSize: 16, fontWeight: 700, color: t.blue }}>Rs {totalCost.toLocaleString()}</div>
+              </div>
+            </div>
+          </div>
+        )
+      })()}
 
-            {/* Cost summary — itinerary view only */}
-            {!mapView && <div style={{ background: t.blueLight, border: `0.5px solid ${t.blue}22`, borderRadius: 12, padding: "16px 20px", marginBottom: 24 }}>
-              <div style={{ fontSize: 12, fontWeight: 600, color: t.blue, marginBottom: 10, textTransform: "uppercase", letterSpacing: "0.05em" }}>Cost estimate breakdown</div>
-              <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12, marginBottom: 14 }}>
-                {[
-                  { label: "Transport", value: itinerary.reduce((s, d) => s + d.activities.filter(a => a.icon === "🚌" || a.icon === "🏠").reduce((ss, a) => ss + a.cost, 0), 0) },
-                  { label: "Activities & entry", value: itinerary.reduce((s, d) => s + d.activities.filter(a => a.icon !== "🚌" && a.icon !== "🏠" && a.icon !== "🏨" && a.icon !== "🍽" && a.icon !== "🍜" && a.icon !== "🍱" && a.icon !== "🌱").reduce((ss, a) => ss + a.cost, 0), 0) },
-                  { label: "Food", value: itinerary.reduce((s, d) => s + d.activities.filter(a => ["🍽","🍜","🍱","🌱","🧺","🍞"].includes(a.icon)).reduce((ss, a) => ss + a.cost, 0), 0) },
-                  { label: "Accommodation", value: itinerary.reduce((s, d) => s + d.activities.filter(a => a.icon === "🏨").reduce((ss, a) => ss + a.cost, 0), 0) },
-                ].map((item) => (
-                  <div key={item.label}>
-                    <div style={{ fontSize: 10, color: t.blue, opacity: 0.7, marginBottom: 3 }}>{item.label}</div>
-                    <div style={{ fontSize: 14, fontWeight: 700, color: t.blue }}>Rs {item.value.toLocaleString()}</div>
-                  </div>
+      {/* ── Right panel: always-visible large Google Map ──────────────────── */}
+      <div style={{ flex: 1, position: "relative", overflow: "hidden" }}>
+
+        {/* ── Full-height Google Map (always visible) ── */}
+        <div style={{ position: "absolute", inset: 0 }}>
+          {phase === "itinerary" && selected ? (
+            <ItineraryMap dest={selected} itinerary={itinerary} activeDay={activeDay} from={from || "Kathmandu"} isDark={isDark} t={t} />
+          ) : mapDest ? (
+            <RouteMap
+              origin={(from || "Kathmandu") + (from.toLowerCase().includes("nepal") ? "" : ", Nepal")}
+              waypoints={addedStops.filter(Boolean)}
+              destination={mapDest}
+              travelMode={travelMode}
+              isDark={isDark} t={t}
+              onInfo={setRouteInfo}
+            />
+          ) : (
+            <div style={{ width: "100%", height: "100%", background: t.subtle, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 14 }}>
+              <div style={{ fontSize: 52 }}>🗺</div>
+              <div style={{ fontSize: 15, fontWeight: 600, color: t.textMid }}>Enter a destination to preview the route</div>
+              <div style={{ fontSize: 12, color: t.textFaint, maxWidth: 280, textAlign: "center", lineHeight: 1.6 }}>
+                Type your destination on the left — the map will show the route and popular stops along the way
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* ── Top overlay: route label + loading + day tabs + Open in Google Maps ── */}
+        <div style={{ position: "absolute", top: 0, left: 0, right: 0, zIndex: 10, padding: "10px 12px", display: "flex", alignItems: "center", gap: 8, pointerEvents: "none" }}>
+          {/* Route summary */}
+          {mapDest && (
+            <div style={{ pointerEvents: "all", background: "rgba(255,255,255,0.92)", backdropFilter: "blur(8px)", borderRadius: 20, padding: "5px 12px", fontSize: 11, display: "flex", alignItems: "center", gap: 6, border: "0.5px solid rgba(255,255,255,0.5)", boxShadow: "0 2px 8px rgba(0,0,0,0.1)" }}>
+              <div style={{ width: 7, height: 7, borderRadius: "50%", background: "#185FA5" }} />
+              <span style={{ color: "#374151" }}>{from || "Kathmandu"}</span>
+              <ArrowRight size={10} color="#9CA3AF" />
+              <div style={{ width: 7, height: 7, borderRadius: "50%", background: "#D85A30" }} />
+              <span style={{ color: "#374151" }}>{destination || selected?.name || ""}</span>
+              {addedStops.length > 0 && (
+                <span style={{ background: "#EAF2E0", color: "#3B6D11", borderRadius: 10, padding: "1px 6px", fontSize: 9, fontWeight: 600 }}>
+                  +{addedStops.length} stop{addedStops.length > 1 ? "s" : ""}
+                </span>
+              )}
+            </div>
+          )}
+          {/* Loading pill */}
+          {(phase === "finding" || phase === "planning") && (
+            <div style={{ pointerEvents: "all", background: "rgba(24,95,165,0.9)", backdropFilter: "blur(4px)", borderRadius: 20, padding: "5px 12px", fontSize: 11, color: "#fff", display: "flex", alignItems: "center", gap: 6, boxShadow: "0 2px 8px rgba(24,95,165,0.3)" }}>
+              <Loader2 size={11} style={{ animation: "spin 1s linear infinite" }} />
+              {phase === "finding" ? "Analysing destinations…" : `Building ${days}-day itinerary…`}
+            </div>
+          )}
+          {/* Right side: day tabs + button */}
+          <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 5, pointerEvents: "all" }}>
+            {phase === "itinerary" && itinerary.length > 1 && itinerary.map((_, i) => (
+              <button key={`rtab-${i}`} onClick={() => setActiveDay(i)} style={{
+                padding: "5px 10px", borderRadius: 7, cursor: "pointer", fontSize: 11, fontWeight: 600,
+                border: `0.5px solid ${activeDay === i ? "rgba(24,95,165,0.8)" : "rgba(255,255,255,0.7)"}`,
+                background: activeDay === i ? "rgba(24,95,165,0.88)" : "rgba(255,255,255,0.88)",
+                color: activeDay === i ? "#fff" : "#374151", backdropFilter: "blur(4px)",
+              }}>Day {i + 1}</button>
+            ))}
+            {/* Travel mode (itinerary) */}
+            {phase === "itinerary" && (
+              <div style={{ background: "rgba(255,255,255,0.9)", backdropFilter: "blur(6px)", borderRadius: 8, padding: "4px", display: "flex", gap: 3, border: "0.5px solid rgba(255,255,255,0.6)" }}>
+                {[{ v: "driving", e: "🚗" }, { v: "walking", e: "🚶" }, { v: "transit", e: "🚌" }].map(m => (
+                  <button key={m.v} onClick={() => setTravelMode(m.v as any)} style={{
+                    width: 28, height: 28, borderRadius: 6, cursor: "pointer", fontSize: 14,
+                    border: `0.5px solid ${travelMode === m.v ? "#185FA5" : "transparent"}`,
+                    background: travelMode === m.v ? "#EBF2FB" : "transparent",
+                    display: "flex", alignItems: "center", justifyContent: "center",
+                  }}>{m.e}</button>
                 ))}
               </div>
-              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", paddingTop: 12, borderTop: `0.5px solid ${t.blue}20` }}>
-                <div style={{ fontSize: 12, color: t.blue, opacity: 0.8 }}>
-                  {budget >= totalCost
-                    ? `✓ Within budget — Rs ${(budget - totalCost).toLocaleString()} remaining`
-                    : `⚠ Rs ${(totalCost - budget).toLocaleString()} over budget — consider adjusting days or activities`}
-                </div>
-                <div>
-                  <div style={{ fontSize: 10, color: t.blue, opacity: 0.7, textAlign: "right" }}>Estimated total</div>
-                  <div style={{ fontSize: 22, fontWeight: 700, color: t.blue }}>Rs {totalCost.toLocaleString()}</div>
-                </div>
-              </div>
-            </div>}
+            )}
+            {/* Open in Google Maps */}
+            {mapDest && (
+              <button onClick={() => window.open(openMapsUrl, "_blank")} style={{
+                padding: "7px 14px", borderRadius: 8, border: "none", cursor: "pointer",
+                background: "rgba(24,95,165,0.9)", color: "#fff", fontSize: 11, fontWeight: 700,
+                display: "flex", alignItems: "center", gap: 5, backdropFilter: "blur(4px)",
+                boxShadow: "0 2px 10px rgba(24,95,165,0.35)",
+              }}>
+                🗺 Open in Google Maps
+              </button>
+            )}
+          </div>
+        </div>
 
-            {/* ── ML Analysis panel (live from MongoDB + Python backend) ─── */}
-            {!mapView && <MLAnalysisPanel destName={selected.name} t={t} />}
+        {/* ── Bottom-left: route distance & time chips ── */}
+        {routeInfo.distance !== "—" && (
+          <div style={{ position: "absolute", bottom: debouncedDest && phase !== "itinerary" ? 88 : 12, left: 12, zIndex: 10, display: "flex", gap: 6 }}>
+            {[{ label: "Distance", val: routeInfo.distance }, { label: "Est. time", val: routeInfo.duration }].map(item => (
+              <div key={item.label} style={{ background: "rgba(255,255,255,0.92)", backdropFilter: "blur(8px)", borderRadius: 8, padding: "6px 12px", border: "0.5px solid rgba(255,255,255,0.6)", boxShadow: "0 2px 8px rgba(0,0,0,0.1)" }}>
+                <div style={{ fontSize: 9, color: "#6B7280", textTransform: "uppercase", letterSpacing: "0.05em" }}>{item.label}</div>
+                <div style={{ fontSize: 13, fontWeight: 700, color: "#111827" }}>{item.val}</div>
+              </div>
+            ))}
           </div>
         )}
+
+        {/* ── Bottom: popular stops strip ── */}
+        {debouncedDest && phase !== "itinerary" && (() => {
+          const stops = getPopularStops(debouncedDest).slice(0, 5)
+          if (!stops.length) return null
+          return (
+            <div style={{ position: "absolute", bottom: 0, left: 0, right: 0, zIndex: 10, padding: "0 12px 12px" }}>
+              <div style={{ background: "rgba(255,255,255,0.95)", backdropFilter: "blur(12px)", borderRadius: 12, padding: "10px 12px", border: "0.5px solid rgba(255,255,255,0.8)", boxShadow: "0 -4px 20px rgba(0,0,0,0.08)" }}>
+                <div style={{ fontSize: 10, fontWeight: 700, color: "#374151", marginBottom: 8, textTransform: "uppercase", letterSpacing: "0.06em" }}>
+                  Popular stops on this route — click to add
+                </div>
+                <div style={{ display: "flex", gap: 6, overflowX: "auto" }}>
+                  {stops.map(stop => {
+                    const added = addedStops.includes(stop.name)
+                    return (
+                      <div
+                        key={stop.name}
+                        onClick={() => !added && setAddedStops(s => [...s, stop.name])}
+                        style={{
+                          flexShrink: 0, display: "flex", alignItems: "center", gap: 6,
+                          padding: "6px 12px", borderRadius: 20, cursor: added ? "default" : "pointer",
+                          border: `0.5px solid ${added ? "#3B6D1140" : "#E5E7EB"}`,
+                          background: added ? "#EAF2E0" : "#F9FAFB",
+                          transition: "all 0.15s",
+                        }}
+                        onMouseEnter={e => { if (!added) e.currentTarget.style.background = "#EBF2FB" }}
+                        onMouseLeave={e => { if (!added) e.currentTarget.style.background = "#F9FAFB" }}
+                      >
+                        <span style={{ fontSize: 16 }}>{stop.emoji}</span>
+                        <div>
+                          <div style={{ fontSize: 11, fontWeight: 600, color: added ? "#3B6D11" : "#374151" }}>{stop.name}</div>
+                          <div style={{ fontSize: 9, color: added ? "#3B6D11" : "#9CA3AF" }}>{stop.note}</div>
+                        </div>
+                        <span style={{ fontSize: added ? 13 : 16, color: added ? "#3B6D11" : "#9CA3AF", marginLeft: 2, lineHeight: 1 }}>
+                          {added ? "✓" : "+"}
+                        </span>
+                      </div>
+                    )
+                  })}
+                </div>
+              </div>
+            </div>
+          )
+        })()}
       </div>
 
       {/* Floating trip assistant — appears after itinerary is generated */}
