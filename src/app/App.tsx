@@ -1130,17 +1130,14 @@ function ItineraryMap({ dest, itinerary, activeDay, from, isDark, t }: {
 function PathfinderPage() {
   const { t, isDark } = useT()
 
-  // Route inputs — empty by default, no dummy data
   const [origin,      setOrigin]      = useState("")
   const [destination, setDestination] = useState("")
-  const [stops,       setStops]       = useState<string[]>([])   // dynamic intermediate stops
+  const [stops,       setStops]       = useState<string[]>([])
   const [travelMode,  setTravelMode]  = useState("driving")
-
-  // Route state
-  const [searched,        setSearched]        = useState(false)
-  const [routeInfo,       setRouteInfo]       = useState<RouteInfo>({ distance: "—", duration: "—" })
-  const [routeAlts,       setRouteAlts]       = useState<RouteAlternative[]>([])
-  const [selectedRoute,   setSelectedRoute]   = useState(0)
+  const [routeKey,    setRouteKey]    = useState(0)   // increment to trigger map refresh
+  const [routeInfo,   setRouteInfo]   = useState<RouteInfo>({ distance: "—", duration: "—" })
+  const [routeAlts,   setRouteAlts]   = useState<RouteAlternative[]>([])
+  const [selectedRoute, setSelectedRoute] = useState(0)
 
   const addStop    = () => setStops(s => [...s, ""])
   const removeStop = (i: number) => setStops(s => s.filter((_, idx) => idx !== i))
@@ -1155,222 +1152,201 @@ function PathfinderPage() {
     `&travelmode=${travelMode}`
 
   const inp: React.CSSProperties = {
-    flex: 1, height: 36, border: `0.5px solid ${t.border}`, borderRadius: 8,
+    width: "100%", height: 36, border: `0.5px solid ${t.border}`, borderRadius: 8,
     padding: "0 10px 0 28px", fontSize: 13, color: t.text,
     background: t.subtle, outline: "none", boxSizing: "border-box",
   }
 
   return (
-    <div style={{ padding: "28px 32px", maxWidth: 960 }}>
-      <div style={{ marginBottom: 20 }}>
-        <h1 style={{ fontSize: 22, fontWeight: 700, color: t.text, margin: 0 }}>Pathfinder</h1>
-        <p style={{ fontSize: 13, color: t.textSub, margin: "4px 0 0" }}>
-          Plan your route across Nepal with live Google Maps directions and alternate path comparison
-        </p>
-      </div>
+    <div style={{ display: "flex", height: "100%", minHeight: "100vh" }}>
 
-      {/* Route builder card */}
-      <Card style={{ marginBottom: 16 }}>
-        {/* Origin */}
-        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <div style={{ position: "relative", flex: 1 }}>
-              <div style={{ position: "absolute", left: 9, top: "50%", transform: "translateY(-50%)", width: 10, height: 10, borderRadius: "50%", background: t.blue, border: `2px solid ${t.surface}`, boxShadow: `0 0 0 2px ${t.blue}` }} />
-              <input value={origin} onChange={e => setOrigin(e.target.value)} placeholder="Starting point" style={inp} />
-            </div>
+      {/* ── Left panel: route builder ─────────────────────────────────────── */}
+      <div style={{
+        width: 340, minWidth: 340, background: t.surface,
+        borderRight: `0.5px solid ${t.border}`,
+        display: "flex", flexDirection: "column", overflowY: "auto",
+      }}>
+        {/* Header */}
+        <div style={{ padding: "20px 18px 14px", borderBottom: `0.5px solid ${t.border}` }}>
+          <h1 style={{ fontSize: 18, fontWeight: 700, color: t.text, margin: "0 0 3px" }}>Pathfinder</h1>
+          <p style={{ fontSize: 11, color: t.textSub, margin: 0 }}>Live Google Maps route with alternate paths</p>
+        </div>
+
+        {/* Route builder */}
+        <div style={{ padding: "14px 18px", borderBottom: `0.5px solid ${t.border}`, display: "flex", flexDirection: "column", gap: 8 }}>
+          {/* Origin */}
+          <div style={{ position: "relative" }}>
+            <div style={{ position: "absolute", left: 9, top: "50%", transform: "translateY(-50%)", width: 10, height: 10, borderRadius: "50%", background: t.blue, border: `2px solid ${t.surface}`, boxShadow: `0 0 0 2px ${t.blue}`, zIndex: 1 }} />
+            <input value={origin} onChange={e => setOrigin(e.target.value)} placeholder="Starting point" style={inp} />
           </div>
 
-          {/* Dynamic stops */}
-          {stops.map((stop, i) => (
-            <div key={`stop-${i}`} style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              <div style={{ width: 16, display: "flex", flexDirection: "column", alignItems: "center", gap: 2, flexShrink: 0 }}>
-                <div style={{ width: 1, height: 8, background: t.border }} />
-                <div style={{ width: 8, height: 8, borderRadius: "50%", background: t.green, border: `1.5px solid ${t.surface}`, boxShadow: `0 0 0 1.5px ${t.green}` }} />
+          {/* Connector line */}
+          {(stops.length > 0 || true) && (
+            <div style={{ display: "flex", alignItems: "flex-start", gap: 0 }}>
+              <div style={{ display: "flex", flexDirection: "column", alignItems: "center", width: 19, flexShrink: 0, paddingTop: 2 }}>
+                <div style={{ width: 1, flex: 1, background: t.border, minHeight: stops.length * 46 + 8 }} />
               </div>
-              <div style={{ position: "relative", flex: 1 }}>
-                <div style={{ position: "absolute", left: 9, top: "50%", transform: "translateY(-50%)", fontSize: 10, fontWeight: 700, color: t.green }}>
-                  {i + 1}
-                </div>
-                <input
-                  value={stop}
-                  onChange={e => updateStop(i, e.target.value)}
-                  placeholder={`Stop ${i + 1} (e.g. Bhaktapur, Nepal)`}
-                  style={{ ...inp, borderColor: stop ? t.green + "60" : t.border }}
-                />
+              <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 6 }}>
+                {/* Dynamic stops */}
+                {stops.map((stop, i) => (
+                  <div key={`stop-${i}`} style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                    <div style={{ width: 8, height: 8, borderRadius: "50%", background: t.green, border: `1.5px solid ${t.surface}`, boxShadow: `0 0 0 1.5px ${t.green}`, flexShrink: 0 }} />
+                    <div style={{ position: "relative", flex: 1 }}>
+                      <span style={{ position: "absolute", left: 8, top: "50%", transform: "translateY(-50%)", fontSize: 9, fontWeight: 700, color: t.green }}>{i+1}</span>
+                      <input value={stop} onChange={e => updateStop(i, e.target.value)} placeholder={`Stop ${i+1}`} style={{ ...inp, padding: "0 8px 0 22px", height: 32, fontSize: 12 }} />
+                    </div>
+                    <button onClick={() => removeStop(i)} style={{ width: 24, height: 24, borderRadius: 6, border: `0.5px solid ${t.border}`, background: t.surface, color: t.textFaint, cursor: "pointer", fontSize: 14, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>×</button>
+                  </div>
+                ))}
+                {/* Add stop */}
+                <button onClick={addStop} style={{ display: "flex", alignItems: "center", gap: 4, padding: "4px 8px", borderRadius: 6, border: `0.5px dashed ${t.border}`, background: "transparent", color: t.textSub, fontSize: 10, fontWeight: 500, cursor: "pointer", alignSelf: "flex-start" }}>
+                  <span>+</span> Add stop
+                </button>
               </div>
-              <button onClick={() => removeStop(i)} style={{
-                width: 28, height: 28, borderRadius: 7, border: `0.5px solid ${t.border}`,
-                background: t.surface, color: t.textFaint, cursor: "pointer", fontSize: 16,
-                display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0,
-              }}>×</button>
             </div>
-          ))}
-
-          {/* Add stop button */}
-          <div style={{ paddingLeft: 24 }}>
-            <button onClick={addStop} style={{
-              display: "flex", alignItems: "center", gap: 5,
-              padding: "5px 12px", borderRadius: 7,
-              border: `0.5px dashed ${t.border}`, background: "transparent",
-              color: t.textSub, fontSize: 11, fontWeight: 500, cursor: "pointer",
-            }}>
-              <span style={{ fontSize: 14 }}>+</span> Add stop along route
-            </button>
-          </div>
+          )}
 
           {/* Destination */}
-          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <div style={{ width: 16, display: "flex", flexDirection: "column", alignItems: "center", gap: 2, flexShrink: 0 }}>
-              <div style={{ width: 1, height: 8, background: t.border }} />
-              <div style={{ width: 10, height: 10, borderRadius: "50%", background: t.orange, border: `2px solid ${t.surface}`, boxShadow: `0 0 0 2px ${t.orange}` }} />
-            </div>
-            <div style={{ position: "relative", flex: 1 }}>
-              <div style={{ position: "absolute", left: 9, top: "50%", transform: "translateY(-50%)", width: 10, height: 10 }} />
-              <input value={destination} onChange={e => setDestination(e.target.value)} placeholder="Destination" style={inp} />
-            </div>
+          <div style={{ position: "relative" }}>
+            <div style={{ position: "absolute", left: 9, top: "50%", transform: "translateY(-50%)", width: 10, height: 10, borderRadius: "50%", background: t.orange, border: `2px solid ${t.surface}`, boxShadow: `0 0 0 2px ${t.orange}`, zIndex: 1 }} />
+            <input value={destination} onChange={e => setDestination(e.target.value)} placeholder="Destination" style={inp} />
           </div>
         </div>
 
         {/* Mode + Find */}
-        <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 12, paddingTop: 12, borderTop: `0.5px solid ${t.border}` }}>
-          <div style={{ display: "flex", gap: 4 }}>
+        <div style={{ padding: "12px 18px", borderBottom: `0.5px solid ${t.border}` }}>
+          <div style={{ display: "flex", gap: 4, marginBottom: 10 }}>
             {[{ v: "driving", e: "🚗", l: "Drive" }, { v: "walking", e: "🚶", l: "Walk" }, { v: "transit", e: "🚌", l: "Transit" }].map(m => (
               <button key={m.v} onClick={() => setTravelMode(m.v)} style={{
-                display: "flex", alignItems: "center", gap: 4,
-                padding: "5px 10px", borderRadius: 7,
-                border: `0.5px solid ${travelMode === m.v ? t.blue : t.border}`,
-                background: travelMode === m.v ? t.blueLight : t.surface,
-                color: travelMode === m.v ? t.blue : t.textSub,
+                flex: 1, padding: "5px 0", borderRadius: 7, border: `0.5px solid ${travelMode === m.v ? t.blue : t.border}`,
+                background: travelMode === m.v ? t.blueLight : t.surface, color: travelMode === m.v ? t.blue : t.textSub,
                 fontSize: 11, fontWeight: travelMode === m.v ? 600 : 400, cursor: "pointer",
+                display: "flex", flexDirection: "column", alignItems: "center", gap: 2,
               }}>
-                <span>{m.e}</span> {m.l}
+                <span style={{ fontSize: 16 }}>{m.e}</span>
+                <span style={{ fontSize: 9 }}>{m.l}</span>
               </button>
             ))}
           </div>
-          <div style={{ flex: 1 }} />
           <button
-            onClick={() => { if (canSearch) setSearched(true) }}
+            onClick={() => { if (canSearch) { setRouteKey(k => k + 1); setRouteInfo({ distance: "—", duration: "—" }); setRouteAlts([]); setSelectedRoute(0) } }}
             disabled={!canSearch}
             style={{
-              padding: "0 20px", height: 36, borderRadius: 8, border: "none",
-              background: canSearch ? t.blue : t.subtle,
-              color: canSearch ? "#fff" : t.textFaint,
-              fontSize: 12, fontWeight: 600, cursor: canSearch ? "pointer" : "default",
-              transition: "all 0.15s",
+              width: "100%", height: 38, borderRadius: 9, border: "none",
+              background: canSearch ? t.blue : t.subtle, color: canSearch ? "#fff" : t.textFaint,
+              fontSize: 13, fontWeight: 600, cursor: canSearch ? "pointer" : "default", transition: "all 0.15s",
             }}
           >
             Find routes
           </button>
         </div>
-      </Card>
 
-      {/* Empty state */}
-      {!searched && (
-        <div style={{ textAlign: "center", padding: "40px 20px", color: t.textSub }}>
-          <div style={{ fontSize: 40, marginBottom: 12 }}>🗺</div>
-          <div style={{ fontSize: 14, fontWeight: 600, color: t.textMid, marginBottom: 6 }}>Enter origin and destination to find routes</div>
-          <div style={{ fontSize: 12, color: t.textFaint }}>Alternate paths will appear automatically when available</div>
-        </div>
-      )}
-
-      {/* Live map */}
-      {searched && (
-        <>
-          <Card style={{ padding: 0, overflow: "hidden", marginBottom: 16 }}>
-            <div style={{ padding: "12px 16px 10px", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-              <CardTitle right={<Badge color={t.green} bg={t.greenLight}>Google Maps · Live</Badge>}>
-                Route map
-                {routeAlts.length > 1 && (
-                  <span style={{ fontSize: 11, color: t.textFaint, fontWeight: 400, marginLeft: 8 }}>
-                    {routeAlts.length} paths found
-                  </span>
-                )}
-              </CardTitle>
-              <button onClick={() => window.open(mapsUrl, "_blank")} style={{
-                padding: "5px 12px", borderRadius: 7, border: `0.5px solid ${t.blue}`,
-                background: t.blueLight, color: t.blue, fontSize: 11, fontWeight: 600,
-                cursor: "pointer", display: "flex", alignItems: "center", gap: 5, marginBottom: 14,
-              }}>
-                🗺 Open in Google Maps
-              </button>
+        {/* Route alternatives */}
+        {routeAlts.length > 1 && (
+          <div style={{ padding: "12px 18px", borderBottom: `0.5px solid ${t.border}` }}>
+            <div style={{ fontSize: 10, fontWeight: 600, color: t.textFaint, textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 8 }}>
+              {routeAlts.length} paths found
             </div>
-
-            {/* Route alternative selector */}
-            {routeAlts.length > 1 && (
-              <div style={{ display: "flex", gap: 6, padding: "0 16px 12px", flexWrap: "wrap" }}>
-                {routeAlts.map((alt, i) => (
-                  <button key={`alt-${i}`} onClick={() => { setSelectedRoute(i); setRouteInfo(alt) }} style={{
-                    display: "flex", flexDirection: "column", alignItems: "flex-start",
-                    padding: "7px 12px", borderRadius: 9, cursor: "pointer", transition: "all 0.12s",
-                    border: `${selectedRoute === i ? "1.5px" : "0.5px"} solid ${selectedRoute === i ? t.blue : t.border}`,
-                    background: selectedRoute === i ? t.blueLight : t.surface,
-                  }}>
-                    <div style={{ fontSize: 11, fontWeight: 700, color: selectedRoute === i ? t.blue : t.textMid }}>
-                      {i === 0 ? "Fastest" : i === 1 ? "Alternate" : `Route ${i + 1}`}
+            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+              {routeAlts.map((alt, i) => (
+                <button key={`alt-${i}`} onClick={() => { setSelectedRoute(i); setRouteInfo(alt) }} style={{
+                  display: "flex", alignItems: "center", justifyContent: "space-between",
+                  padding: "8px 12px", borderRadius: 9, cursor: "pointer", transition: "all 0.12s",
+                  border: `${selectedRoute === i ? "1.5px" : "0.5px"} solid ${selectedRoute === i ? t.blue : t.border}`,
+                  background: selectedRoute === i ? t.blueLight : t.pageBg, textAlign: "left",
+                }}>
+                  <div>
+                    <div style={{ fontSize: 12, fontWeight: 700, color: selectedRoute === i ? t.blue : t.textMid }}>
+                      {i === 0 ? "⚡ Fastest" : i === 1 ? "↻ Alternate" : `Route ${i + 1}`}
                       {alt.summary ? ` · ${alt.summary}` : ""}
                     </div>
-                    <div style={{ fontSize: 10, color: selectedRoute === i ? t.blue : t.textFaint, marginTop: 2, opacity: 0.85 }}>
+                    <div style={{ fontSize: 10, color: selectedRoute === i ? t.blue : t.textFaint, marginTop: 2 }}>
                       {alt.distance} · {alt.duration}
                     </div>
-                  </button>
-                ))}
-              </div>
-            )}
-
-            <div style={{ height: 380 }}>
-              <RouteMap
-                origin={origin} waypoints={stops.filter(Boolean)} destination={destination}
-                travelMode={travelMode} isDark={isDark} t={t}
-                onInfo={setRouteInfo}
-                onRoutes={(alts) => { setRouteAlts(alts); setSelectedRoute(0); if (alts[0]) setRouteInfo(alts[0]) }}
-                selectedRouteIndex={selectedRoute}
-              />
+                  </div>
+                  {selectedRoute === i && <div style={{ width: 6, height: 6, borderRadius: "50%", background: t.blue }} />}
+                </button>
+              ))}
             </div>
-          </Card>
+          </div>
+        )}
 
-          {/* Route info cards */}
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 14, marginBottom: 16 }}>
+        {/* Route info */}
+        <div style={{ padding: "12px 18px", display: "flex", flexDirection: "column", gap: 8 }}>
+          {[
+            { icon: <Route size={15} />, label: "Distance", value: routeInfo.distance, color: t.blue },
+            { icon: <Clock size={15} />, label: "Travel time", value: routeInfo.duration, color: t.amber },
+            { icon: <ShieldCheck size={15} />, label: "Road condition", value: "Good", color: t.green },
+          ].map((item) => (
+            <div key={item.label} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 10px", borderRadius: 8, background: t.pageBg, border: `0.5px solid ${t.border}` }}>
+              <div style={{ color: item.color, flexShrink: 0 }}>{item.icon}</div>
+              <div style={{ fontSize: 11, color: t.textSub }}>{item.label}</div>
+              <div style={{ marginLeft: "auto", fontSize: 13, fontWeight: 700, color: item.color }}>{item.value}</div>
+            </div>
+          ))}
+        </div>
+
+        {/* Stops list */}
+        {(origin || destination) && (
+          <div style={{ padding: "0 18px 18px" }}>
+            <div style={{ fontSize: 10, fontWeight: 600, color: t.textFaint, textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 8 }}>Route stops</div>
             {[
-              { icon: <Route size={18} />, iconColor: t.blue,  iconBg: t.blueLight,  label: "Total distance",   value: routeInfo.distance, sub: "Via Google Maps Directions API" },
-              { icon: <Clock size={18} />, iconColor: t.amber, iconBg: t.amberLight, label: "Est. travel time", value: routeInfo.duration,  sub: "Under current traffic conditions" },
-              { icon: <ShieldCheck size={18} />, iconColor: t.green, iconBg: t.greenLight, label: "Road condition", value: "Good", sub: "No active alerts on selected route", green: true },
-            ].map((item, i) => (
-              <Card key={`ri-${i}`} style={{ display: "flex", alignItems: "center", gap: 14 }}>
-                <div style={{ width: 44, height: 44, borderRadius: 10, background: item.iconBg, display: "flex", alignItems: "center", justifyContent: "center", color: item.iconColor, flexShrink: 0 }}>
-                  {item.icon}
-                </div>
-                <div>
-                  <div style={{ fontSize: 11, color: t.textSub, marginBottom: 3 }}>{item.label}</div>
-                  <div style={{ fontSize: 18, fontWeight: 700, color: (item as any).green ? t.green : t.text }}>{item.value}</div>
-                  <div style={{ fontSize: 11, color: t.textFaint, marginTop: 2 }}>{item.sub}</div>
-                </div>
-              </Card>
+              { pin: t.blue, name: origin || "—", type: "Start" },
+              ...stops.filter(Boolean).map((s, i) => ({ pin: t.green, name: s, type: `Stop ${i+1}` })),
+              { pin: t.orange, name: destination || "—", type: "End" },
+            ].map((wp, i, arr) => (
+              <div key={`wp-${i}`} style={{ display: "flex", alignItems: "center", gap: 10, padding: "7px 0", borderBottom: i < arr.length - 1 ? `0.5px solid ${t.border}` : "none" }}>
+                <div style={{ width: 10, height: 10, borderRadius: "50%", background: wp.pin, flexShrink: 0 }} />
+                <div style={{ flex: 1, fontSize: 12, color: t.text, fontWeight: 500 }}>{wp.name}</div>
+                <span style={{ fontSize: 9, color: t.textFaint }}>{wp.type}</span>
+                <button onClick={() => window.open(`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(wp.name + " Nepal")}`, "_blank")} style={{ fontSize: 9, color: t.blue, background: t.blueLight, border: "none", borderRadius: 4, padding: "2px 7px", cursor: "pointer" }}>↗</button>
+              </div>
             ))}
           </div>
+        )}
 
-          {/* Stop list */}
-          <Card>
-            <CardTitle>Stops along route</CardTitle>
-            {[
-              { pin: t.blue,   name: origin,      type: "Start" },
-              ...stops.filter(Boolean).map((s, i) => ({ pin: t.green, name: s, type: `Stop ${i + 1}` })),
-              { pin: t.orange, name: destination,  type: "Destination" },
-            ].map((wp, i, arr) => (
-              <div key={`wp-${i}`} style={{ display: "flex", alignItems: "center", gap: 14, padding: "9px 0", borderBottom: i < arr.length - 1 ? `0.5px solid ${t.border}` : "none" }}>
-                <div style={{ width: 12, height: 12, borderRadius: "50%", background: wp.pin, boxShadow: `0 0 0 2px ${wp.pin}30`, flexShrink: 0 }} />
-                <div style={{ flex: 1 }}>
-                  <span style={{ fontSize: 13, fontWeight: 500, color: t.text }}>{wp.name || "—"}</span>
-                  <span style={{ fontSize: 10, color: t.textFaint, marginLeft: 8 }}>{wp.type}</span>
-                </div>
-                <button onClick={() => window.open(`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent((wp.name || "") + " Nepal")}`, "_blank")}
-                  style={{ fontSize: 10, color: t.blue, background: t.blueLight, border: "none", borderRadius: 5, padding: "3px 9px", cursor: "pointer" }}>
-                  View
-                </button>
-              </div>
-            ))}
-          </Card>
-        </>
-      )}
+        {/* Open in Google Maps */}
+        <div style={{ padding: "12px 18px", marginTop: "auto", borderTop: `0.5px solid ${t.border}` }}>
+          <button onClick={() => window.open(mapsUrl, "_blank")} style={{
+            width: "100%", padding: "9px 0", borderRadius: 9, border: `0.5px solid ${t.blue}`,
+            background: t.blueLight, color: t.blue, fontSize: 12, fontWeight: 600, cursor: "pointer",
+            display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
+          }}>
+            🗺 Open full route in Google Maps
+          </button>
+        </div>
+      </div>
+
+      {/* ── Right panel: live Google Map (always visible) ─────────────────── */}
+      <div style={{ flex: 1, position: "relative", overflow: "hidden" }}>
+        {/* Map header bar */}
+        <div style={{ position: "absolute", top: 0, left: 0, right: 0, zIndex: 10, background: t.surface, borderBottom: `0.5px solid ${t.border}`, padding: "10px 16px", display: "flex", alignItems: "center", gap: 8 }}>
+          <Badge color={t.green} bg={t.greenLight}>Google Maps · Live</Badge>
+          {canSearch
+            ? <span style={{ fontSize: 11, color: t.textSub }}>{origin} → {stops.filter(Boolean).join(" → ")}{stops.filter(Boolean).length ? " → " : ""}{destination}</span>
+            : <span style={{ fontSize: 11, color: t.textFaint }}>Enter origin & destination then click Find routes</span>
+          }
+          {routeAlts.length > 1 && (
+            <span style={{ marginLeft: "auto", fontSize: 10, color: t.blue, fontWeight: 600 }}>{routeAlts.length} routes found</span>
+          )}
+        </div>
+
+        {/* The live map — fills full height */}
+        <div style={{ position: "absolute", top: 41, left: 0, right: 0, bottom: 0 }}>
+          <RouteMap
+            key={routeKey}
+            origin={canSearch ? origin : "Kathmandu, Nepal"}
+            waypoints={stops.filter(Boolean)}
+            destination={canSearch ? destination : ""}
+            travelMode={travelMode}
+            isDark={isDark}
+            t={t}
+            onInfo={(info) => { if (canSearch) setRouteInfo(info) }}
+            onRoutes={(alts) => { if (canSearch) { setRouteAlts(alts); setSelectedRoute(0); if (alts[0]) setRouteInfo(alts[0]) } }}
+            selectedRouteIndex={selectedRoute}
+          />
+        </div>
+      </div>
     </div>
   )
 }
