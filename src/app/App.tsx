@@ -1,17 +1,49 @@
-import { useState, createContext, useContext, useRef, useEffect } from "react"
+import { useState, createContext, useContext, useRef, useEffect, Component } from "react"
 
-// callAI — stubs to null in preview; deploy the Supabase Edge Function to activate.
-// The callers (handleFind, handlePlan, send) already fall back to mock when null.
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-async function callAI<T = Record<string, unknown>>(_a: string, _p: Record<string, unknown>): Promise<T | null> { return null }
+// ── Error boundary — prevents map errors from blanking the whole page ─────────
+class MapBoundary extends Component<{ children: React.ReactNode }, { err: boolean }> {
+  state = { err: false }
+  static getDerivedStateFromError() { return { err: true } }
+  componentDidCatch(e: Error) { console.error("[MapBoundary]", e.message) }
+  render() {
+    if (this.state.err) return (
+      <div style={{ width:"100%", height:"100%", display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", gap:10, background:"#F2F5F9" }}>
+        <div style={{ fontSize:32 }}>🗺</div>
+        <div style={{ fontSize:13, color:"#374151", fontWeight:600 }}>Map failed to load</div>
+        <button onClick={() => this.setState({ err:false })} style={{ padding:"6px 16px", borderRadius:8, border:"0.5px solid #185FA5", background:"#EBF2FB", color:"#185FA5", fontSize:12, fontWeight:600, cursor:"pointer" }}>
+          Retry
+        </button>
+      </div>
+    )
+    return this.props.children
+  }
+}
+import { callAI } from "../lib/supabase"
+
+// Suppress Google Maps deprecation warnings for DirectionsService / DirectionsRenderer.
+// These APIs still work and won't be discontinued for ≥12 months (as of Feb 2026 notice).
+// Remove this block when migrating to google.maps.routes.computeRoutes.
+;(() => {
+  const _w = console.warn.bind(console)
+  console.warn = (...a: unknown[]) => {
+    const m = String(a[0] ?? "")
+    if (
+    m.includes("DirectionsService is deprecated") ||
+    m.includes("DirectionsRenderer is deprecated") ||
+    m.includes("google.maps.Marker is deprecated") ||
+    m.includes("PlacesService is not available to new customers")
+  ) return
+    _w(...a)
+  }
+})()
 import {
-  BarChart2, Compass, Calendar, MapPin, Navigation,
+  BarChart2, Compass, Calendar, MapPin,
   BookOpen, Users, Building2, Wallet, ShieldCheck,
   Wifi, Car, Coffee, Star, Sparkles, Clock,
   Fuel, Hospital, CheckCircle2, ChevronRight,
   ArrowRight, Route, Bed, Mountain, Sun, Moon,
   PanelLeftClose, PanelLeftOpen, Bot, Send, MapPinned,
-  Landmark, TreePine, Scroll, Camera, Loader2
+  Landmark, TreePine, Scroll, Camera, Loader2, Utensils
 } from "lucide-react"
 
 // ─── Theme ────────────────────────────────────────────────────────────────────
@@ -49,13 +81,22 @@ const dark: Theme = {
   red: "#EF4444", redLight: "#3A1010",
 }
 
-interface Ctx { t: Theme; isDark: boolean; toggleDark: () => void }
-const ThemeCtx = createContext<Ctx>({ t: light, isDark: false, toggleDark: () => {} })
+interface NavRequest { origin: string; dest: string }
+interface Ctx {
+  t: Theme; isDark: boolean; toggleDark: () => void
+  navigateTo: (page: Page, nav?: NavRequest) => void
+  pendingNav: NavRequest | null
+  clearNav: () => void
+}
+const ThemeCtx = createContext<Ctx>({
+  t: light, isDark: false, toggleDark: () => {},
+  navigateTo: () => {}, pendingNav: null, clearNav: () => {},
+})
 const useT = () => useContext(ThemeCtx)
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
-type Page = "dashboard" | "pathfinder" | "smart-planner" | "nearby" | "live-tracking" | "book"
+type Page = "dashboard" | "pathfinder" | "smart-planner" | "nearby" | "book"
 type Season = "All" | "Spring" | "Summer" | "Autumn" | "Winter"
 
 // ─── Reusable primitives ──────────────────────────────────────────────────────
@@ -694,7 +735,7 @@ function DashboardPage() {
   const handleProvinceChange = (id: string) => { setProvinceId(id); setShowAllPlaces(false) }
 
   return (
-    <div style={{ padding: "0 0 28px", maxWidth: 1140 }}>
+    <div style={{ padding: "0 0 28px", maxWidth: 1140, width: "100%", margin: "0 auto" }}>
 
       {/* ── Hero banner ── */}
       <div style={{ position: "relative", overflow: "hidden", marginBottom: 28, minHeight: 220 }}>
@@ -1013,22 +1054,78 @@ function NoKeyPlaceholder({ t }: { t: Theme }) {
 interface RouteInfo { distance: string; duration: string }
 interface RouteAlternative { index: number; distance: string; duration: string; summary: string }
 
-function RouteMap({ origin, waypoints, viaPoints = [], destination, travelMode, isDark, t, onInfo, onRoutes, selectedRouteIndex = 0 }: {
+function RouteMap({ origin, waypoints, viaPoints = [], destination, travelMode, isDark, t, onInfo, onRoutes, selectedRouteIndex = 0, pinLocations = [] }: {
   origin: string; waypoints: string[]; viaPoints?: string[]; destination: string
   travelMode: string; isDark?: boolean; t: Theme
   onInfo?: (info: RouteInfo) => void
   onRoutes?: (routes: RouteAlternative[]) => void
   selectedRouteIndex?: number
+  /** Extra locations to pin on the map via Places API — shown even if they can't be routed through */
+  pinLocations?: string[]
 }) {
   const divRef        = useRef<HTMLDivElement>(null)
   const mapObj        = useRef<any>(null)
   const renderersRef  = useRef<any[]>([])
+  const pinMarkersRef = useRef<any[]>([])
   const [zeroResults, setZeroResults] = useState(false)
 
   const clearRenderers = () => {
     renderersRef.current.forEach(r => { try { r.setMap(null) } catch {} })
     renderersRef.current = []
   }
+
+  const clearPinMarkers = () => {
+    pinMarkersRef.current.forEach(m => { try { m.setMap(null) } catch {} })
+    pinMarkersRef.current = []
+  }
+
+  // ── Geocode and pin extra locations (Places API, works even for trekking spots) ──
+  useEffect(() => {
+    if (!pinLocations.length) { clearPinMarkers(); return }
+    if (!(window as any).google?.maps?.places) return
+    const g = (window as any).google.maps
+
+    clearPinMarkers()
+
+    const svc = new g.places.PlacesService(mapObj.current || document.createElement("div"))
+    const infoWin = new g.InfoWindow()
+
+    pinLocations.filter(Boolean).forEach(loc => {
+      svc.findPlaceFromQuery(
+        { query: loc.toLowerCase().includes("nepal") ? loc : `${loc}, Nepal`, fields: ["geometry", "name"] },
+        (results: any[], status: string) => {
+          if (status !== "OK" || !results[0]?.geometry?.location) return
+          const pos = results[0].geometry.location
+          const shortName = loc.split(",")[0].trim()
+          const marker = new g.Marker({
+            position: pos,
+            map: mapObj.current,
+            title: shortName,
+            zIndex: 60,
+            icon: {
+              path: "M 0,-12 C -6,-12 -10,-8 -10,-3 C -10,4 0,12 0,12 C 0,12 10,4 10,-3 C 10,-8 6,-12 0,-12 Z",
+              fillColor: "#3B6D11",
+              fillOpacity: 1,
+              strokeColor: "#ffffff",
+              strokeWeight: 2,
+              scale: 1,
+              anchor: new g.Point(0, 12),
+            },
+          })
+          marker.addListener("click", () => {
+            infoWin.setContent(
+              `<div style="font-family:Inter,sans-serif;padding:4px 6px">
+                <div style="font-size:12px;font-weight:700;color:#111827">📍 ${shortName}</div>
+                <div style="font-size:10px;color:#6B7280;margin-top:2px">Added stop</div>
+              </div>`
+            )
+            infoWin.open(mapObj.current, marker)
+          })
+          pinMarkersRef.current.push(marker)
+        }
+      )
+    })
+  }, [pinLocations.join("|")])
 
   // Update polyline styles instantly when user switches routes (no re-fetch)
   useEffect(() => {
@@ -1056,26 +1153,49 @@ function RouteMap({ origin, waypoints, viaPoints = [], destination, travelMode, 
         g.event.trigger(mapObj.current, "resize")
       }
 
-      const addNepal = (s: string) => s.toLowerCase().includes("nepal") ? s : `${s}, Nepal`
+      // GPS coordinates (e.g. "27.712,85.324") must NOT have ", Nepal" appended
+      const addNepal = (s: string) => {
+        const t = s.trim()
+        if (/^-?\d+\.?\d*,\s*-?\d+\.?\d*$/.test(t)) return t  // raw lat,lng — use as-is
+        return t.toLowerCase().includes("nepal") ? t : `${t}, Nepal`
+      }
       const modeMap: Record<string, string> = { driving: "DRIVING", walking: "WALKING", transit: "TRANSIT" }
 
-      new g.DirectionsService().route({
-        origin:      addNepal(origin),
-        destination: addNepal(destination),
-        waypoints: [
-          ...waypoints.filter(Boolean).map((w: string) => ({ location: addNepal(w), stopover: true })),
-          ...viaPoints.filter(Boolean).map((w: string) => ({ location: addNepal(w), stopover: false })),
-        ],
-        travelMode:  g.TravelMode[modeMap[travelMode] ?? "DRIVING"],
-        region:      "NP",
-        provideRouteAlternatives: true,
-        optimizeWaypoints: false,
-      }, (result: any, status: string) => {
+      // Route helper — retries without waypoints if they cause ZERO_RESULTS
+      const svc = new g.DirectionsService()
+      const buildWaypoints = (wps: string[]) =>
+        wps.filter(Boolean).map((w: string) => ({ location: addNepal(w), stopover: true }))
+
+      const doRoute = (wps: string[], retriedWithout = false) => {
+        svc.route({
+          origin:      addNepal(origin),
+          destination: addNepal(destination),
+          waypoints: [
+            ...buildWaypoints(wps),
+            ...viaPoints.filter(Boolean).map((w: string) => ({ location: addNepal(w), stopover: false })),
+          ],
+          travelMode:  g.TravelMode[modeMap[travelMode] ?? "DRIVING"],
+          region:      "NP",
+          provideRouteAlternatives: !retriedWithout,
+          optimizeWaypoints: false,
+        }, (result: any, status: string) => {
+          if (cancelled) return
+          if (status !== "OK") {
+            if (!retriedWithout && wps.length > 0) {
+              // Waypoints may be unresolvable — retry without them
+              doRoute([], true)
+            } else {
+              if (status === "ZERO_RESULTS") setZeroResults(true)
+            }
+            return
+          }
+          setZeroResults(false)
+          routeHandler(result)
+        })
+      }
+
+      const routeHandler = (result: any) => {
         if (cancelled) return
-        if (status !== "OK") {
-          if (status === "ZERO_RESULTS") setZeroResults(true)
-          return
-        }
         setZeroResults(false)
 
         clearRenderers()
@@ -1100,10 +1220,13 @@ function RouteMap({ origin, waypoints, viaPoints = [], destination, travelMode, 
         })
         onRoutes?.(alternatives)
         if (alternatives[selectedRouteIndex]) onInfo?.(alternatives[selectedRouteIndex])
-      })
+      }  // end routeHandler
+
+      // Start routing — passes waypoints first, retries without if they fail
+      doRoute(waypoints.filter(Boolean))
     })
 
-    return () => { cancelled = true }
+    return () => { cancelled = true; clearPinMarkers() }
   }, [origin, destination, travelMode, waypoints.join(","), viaPoints.join(","), isDark])
 
   if (!GMAPS_KEY) return <NoKeyPlaceholder t={t} />
@@ -1158,22 +1281,37 @@ function ItineraryMap({ dest, itinerary, activeDay, from, isDark, t }: {
 }
 
 function PathfinderPage() {
-  const { t, isDark } = useT()
+  const { t, isDark, pendingNav, clearNav } = useT()
 
   const [origin,      setOrigin]      = useState("")
   const [destination, setDestination] = useState("")
   const [stops,       setStops]       = useState<string[]>([])
   const [travelMode,  setTravelMode]  = useState("driving")
-  const [routeKey,    setRouteKey]    = useState(0)   // increment to trigger map refresh
+  const [routeKey,    setRouteKey]    = useState(0)
   const [routeInfo,   setRouteInfo]   = useState<RouteInfo>({ distance: "—", duration: "—" })
   const [routeAlts,   setRouteAlts]   = useState<RouteAlternative[]>([])
   const [selectedRoute, setSelectedRoute] = useState(0)
+
+  // ── Apply navigation request from NearbyPage ──────────────────────────────
+  useEffect(() => {
+    if (!pendingNav) return
+    setOrigin(pendingNav.origin)
+    setDestination(pendingNav.dest)
+    setStops([])
+    setRouteKey(k => k + 1)
+    setRouteInfo({ distance: "—", duration: "—" })
+    setRouteAlts([])
+    setSelectedRoute(0)
+    setSearched(true)
+    clearNav()
+  }, [pendingNav])
 
   const addStop    = () => setStops(s => [...s, ""])
   const removeStop = (i: number) => setStops(s => s.filter((_, idx) => idx !== i))
   const updateStop = (i: number, v: string) => setStops(s => s.map((x, idx) => idx === i ? v : x))
 
   const canSearch = origin.trim().length > 0 && destination.trim().length > 0
+  const [searched, setSearched] = useState(false)
 
   const mapsUrl = `https://www.google.com/maps/dir/?api=1` +
     `&origin=${encodeURIComponent(origin.trim() || "Kathmandu, Nepal")}` +
@@ -1259,7 +1397,7 @@ function PathfinderPage() {
             ))}
           </div>
           <button
-            onClick={() => { if (canSearch) { setRouteKey(k => k + 1); setRouteInfo({ distance: "—", duration: "—" }); setRouteAlts([]); setSelectedRoute(0) } }}
+            onClick={() => { if (canSearch) { setRouteKey(k => k + 1); setRouteInfo({ distance: "—", duration: "—" }); setRouteAlts([]); setSelectedRoute(0); setSearched(true) } }}
             disabled={!canSearch}
             style={{
               width: "100%", height: 38, borderRadius: 9, border: "none",
@@ -1377,749 +1515,1100 @@ function PathfinderPage() {
           />
         </div>
       </div>
-    </div>
-  )
-}
 
-function NearbyPage() {
-  const { t } = useT()
+      {/* ── Facilities on this route ── */}
+      {canSearch && searched && (() => {
+        const distKm = parseFloat(routeInfo.distance) || 100
+        const orig = origin.split(",")[0].trim()
+        const dest = destination.split(",")[0].trim()
+        const addNepalSuffix = (s: string) => {
+          const t = s.trim()
+          if (/^-?\d+\.?\d*,\s*-?\d+\.?\d*$/.test(t)) return t
+          return t.toLowerCase().includes("nepal") ? t : `${t}, Nepal`
+        }
 
-  const facilities = [
-    { icon: <Fuel size={18} />, iconColor: t.amber, iconBg: t.amberLight, name: "Himalayan Petroleum Station", type: "Petrol pump", typeColor: t.amber, typeBg: t.amberLight, distance: "0.4 km", detail: "Open 24/7" },
-    { icon: <Bed size={18} />, iconColor: t.blue, iconBg: t.blueLight, name: "Kathmandu Grand Hotel", type: "Hotel", typeColor: t.blue, typeBg: t.blueLight, distance: "0.9 km", detail: "From Rs 3,200 / night" },
-    { icon: <Hospital size={18} />, iconColor: t.red, iconBg: t.redLight, name: "Norvic International Hospital", type: "Hospital", typeColor: t.red, typeBg: t.redLight, distance: "1.2 km", detail: "24/7 Emergency" },
-  ]
+        // Build Google Maps URL: original route + facility as waypoint search
+        function facilityRouteUrl(facilitySearch: string) {
+          // Uses Google Maps path-format: /dir/start/facility_search/end
+          // This shows the actual route WITH the facility pinned on it
+          return (
+            `https://www.google.com/maps/dir/` +
+            `${encodeURIComponent(addNepalSuffix(origin))}/` +
+            `${encodeURIComponent(facilitySearch + " near route, Nepal")}/` +
+            `${encodeURIComponent(addNepalSuffix(destination))}` +
+            `?travelmode=${travelMode}`
+          )
+        }
 
-  return (
-    <div style={{ padding: "28px 32px", maxWidth: 760 }}>
-      <div style={{ marginBottom: 24 }}>
-        <h1 style={{ fontSize: 22, fontWeight: 700, color: t.text, margin: 0 }}>Nearby facilities</h1>
-        <p style={{ fontSize: 13, color: t.textSub, margin: "4px 0 0" }}>Services and amenities near your location</p>
-      </div>
+        const FACILITIES = [
+          {
+            icon: "🍽", name: "Restaurants & dhabas",
+            tip: "Plan a meal stop at the midpoint town",
+            dist: `~${Math.round(distKm * 0.4)} km from ${orig}`,
+            info: "Rs 150–500 / meal",
+            search: "restaurant dhaba",
+          },
+          {
+            icon: "⛽", name: "Petrol stations",
+            tip: distKm > 80 ? "Plan 1–2 fuel stops — carry extra for remote stretches" : "Top up before departure",
+            dist: `~${Math.round(distKm * 0.28)} km from ${orig}`,
+            info: "Rs 168–175 / litre",
+            search: "petrol station fuel pump",
+          },
+          {
+            icon: "🏨", name: "Hotels & lodges",
+            tip: distKm > 150 ? "Long journey — overnight stop recommended" : "Rest stop along the way",
+            dist: `~${Math.round(distKm * 0.5)} km from ${orig}`,
+            info: "Rs 800–3,500 / night",
+            search: "hotel lodge guesthouse",
+          },
+          {
+            icon: "🏥", name: "Hospitals & clinics",
+            tip: "Note nearest medical facility before you depart",
+            dist: `~${Math.round(distKm * 0.35)} km from ${orig}`,
+            info: "Nepal emergency: 102",
+            search: "hospital clinic emergency",
+          },
+          {
+            icon: "🏧", name: "ATMs",
+            tip: "Carry cash — ATMs are scarce beyond district headquarters",
+            dist: `~${Math.round(distKm * 0.15)} km from ${orig}`,
+            info: "Withdraw at your origin city",
+            search: "ATM bank cash",
+          },
+          {
+            icon: "💊", name: "Pharmacies",
+            tip: "Pack a travel health kit for remote areas",
+            dist: `~${Math.round(distKm * 0.6)} km from ${orig}`,
+            info: "Basic meds available at bazaars",
+            search: "pharmacy chemist medicine",
+          },
+        ]
 
-      <div style={{ display: "inline-flex", alignItems: "center", gap: 6, marginBottom: 20, background: t.surface, border: `0.5px solid ${t.border}`, borderRadius: 20, padding: "6px 14px", fontSize: 12, color: t.textMid }}>
-        <div style={{ width: 7, height: 7, borderRadius: "50%", background: t.green, boxShadow: `0 0 0 2px ${t.greenLight}` }} />
-        Near Thamel, Kathmandu — GPS active
-      </div>
-
-      <div style={{ display: "flex", gap: 6, marginBottom: 20 }}>
-        {["All","Fuel","Hotels","Hospitals","ATMs","Restaurants"].map((tab, i) => (
-          <button key={tab} style={{
-            padding: "5px 14px", borderRadius: 7, border: `0.5px solid ${i === 0 ? t.blue : t.border}`,
-            fontSize: 12, fontWeight: 500, cursor: "pointer",
-            background: i === 0 ? t.blue : t.surface, color: i === 0 ? "#ffffff" : t.textSub,
-          }}>
-            {tab}
-          </button>
-        ))}
-      </div>
-
-      <div style={{ display: "flex", flexDirection: "column", gap: 12, marginBottom: 20 }}>
-        {facilities.map((f, i) => (
-          <Card key={i} style={{ padding: "16px 20px" }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
-              <div style={{ width: 44, height: 44, borderRadius: 10, background: f.iconBg, color: f.iconColor, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
-                {f.icon}
-              </div>
-              <div style={{ flex: 1 }}>
-                <div style={{ fontSize: 13, fontWeight: 600, color: t.text, marginBottom: 3 }}>{f.name}</div>
-                <div style={{ fontSize: 12, color: t.textSub }}>{f.detail}</div>
-              </div>
-              <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 6 }}>
-                <Badge color={f.typeColor} bg={f.typeBg}>{f.type}</Badge>
-                <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
-                  <MapPin size={10} color={t.textFaint} />
-                  <span style={{ fontSize: 11, color: t.textFaint }}>{f.distance}</span>
-                </div>
-              </div>
-              <button style={{ padding: "7px 14px", borderRadius: 7, marginLeft: 4, border: `0.5px solid ${t.border}`, background: t.surface, fontSize: 11, fontWeight: 500, color: t.blue, cursor: "pointer" }}>
-                Navigate
-              </button>
-            </div>
-          </Card>
-        ))}
-      </div>
-
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 10, marginBottom: 20 }}>
-        {[
-          { icon: "🏧", label: "ATMs nearby", count: 8, color: t.blue },
-          { icon: "🍽", label: "Restaurants", count: 24, color: t.orange },
-          { icon: "🏪", label: "Pharmacies", count: 6, color: t.green },
-          { icon: "🚌", label: "Bus stops", count: 5, color: t.amber },
-        ].map((item) => (
-          <Card key={item.label} style={{ padding: 14, textAlign: "center", cursor: "pointer" }}>
-            <div style={{ fontSize: 22, marginBottom: 4 }}>{item.icon}</div>
-            <div style={{ fontSize: 18, fontWeight: 700, color: item.color }}>{item.count}</div>
-            <div style={{ fontSize: 11, color: t.textSub, marginTop: 1 }}>{item.label}</div>
-          </Card>
-        ))}
-      </div>
-
-      <div style={{ background: t.greenLight, border: `0.5px solid ${t.green}30`, borderRadius: 12, padding: "16px 20px", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-          <div style={{ width: 36, height: 36, borderRadius: 9, background: t.green, display: "flex", alignItems: "center", justifyContent: "center" }}>
-            <CheckCircle2 size={18} color="#ffffff" />
-          </div>
-          <div>
-            <div style={{ fontSize: 13, fontWeight: 600, color: t.green }}>Your location is safe — no alerts</div>
-            <div style={{ fontSize: 11, color: t.green, opacity: 0.7, marginTop: 2 }}>Last checked: just now · Bagmati Province emergency services active</div>
-          </div>
-        </div>
-        <button style={{ padding: "8px 18px", borderRadius: 8, border: `0.5px solid ${t.green}`, background: t.surface, color: t.green, fontSize: 12, fontWeight: 600, cursor: "pointer", display: "flex", alignItems: "center", gap: 6 }}>
-          <Navigation size={13} /> Live tracking
-        </button>
-      </div>
-    </div>
-  )
-}
-
-function LiveTrackingPage() {
-  const { t } = useT()
-  return (
-    <div style={{ padding: "28px 32px", maxWidth: 900 }}>
-      <div style={{ marginBottom: 24 }}>
-        <h1 style={{ fontSize: 22, fontWeight: 700, color: t.text, margin: 0 }}>Live tracking</h1>
-        <p style={{ fontSize: 13, color: t.textSub, margin: "4px 0 0" }}>Real-time visitor and safety monitoring</p>
-      </div>
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 320px", gap: 16 }}>
-        <Card style={{ padding: 0, overflow: "hidden" }}>
-          <div style={{ padding: "14px 20px 12px" }}>
-            <CardTitle right={
-              <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
-                <div style={{ width: 7, height: 7, borderRadius: "50%", background: t.green }} />
-                <span style={{ fontSize: 11, color: t.green }}>Live</span>
-              </div>
-            }>
-              Live activity map
-            </CardTitle>
-          </div>
-          <div style={{ height: 360, position: "relative" }}>
-            <BagmatiMap />
-            <div style={{ position: "absolute", top: "52%", left: "44%", width: 14, height: 14, borderRadius: "50%", background: t.blue, border: "2px solid white", boxShadow: `0 0 0 4px ${t.blueLight}, 0 2px 8px rgba(24,95,165,0.4)` }} />
-          </div>
-        </Card>
-        <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-          <Card>
-            <CardTitle>Active zones</CardTitle>
-            {[
-              { name: "Thamel", count: 1240, level: "High", color: t.orange },
-              { name: "Boudha", count: 870, level: "Medium", color: t.amber },
-              { name: "Patan", count: 560, level: "Medium", color: t.amber },
-              { name: "Bhaktapur", count: 340, level: "Low", color: t.green },
-            ].map((zone) => (
-              <div key={zone.name} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "8px 0", borderBottom: `0.5px solid ${t.border}` }}>
+        return (
+          <Card style={{ padding: 0, overflow: "hidden" }}>
+            {/* Header */}
+            <div style={{ padding: "12px 18px", borderBottom: `0.5px solid ${t.border}`, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <span style={{ fontSize: 16 }}>🗺</span>
                 <div>
-                  <div style={{ fontSize: 12, fontWeight: 500, color: t.text }}>{zone.name}</div>
-                  <div style={{ fontSize: 11, color: t.textFaint }}>{zone.count.toLocaleString()} active</div>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: t.text }}>Facilities on this route</div>
+                  <div style={{ fontSize: 11, color: t.textSub }}>{orig} → {dest}</div>
                 </div>
-                <Badge color={zone.color} bg={zone.color + "18"}>{zone.level}</Badge>
               </div>
-            ))}
-          </Card>
-          <Card>
-            <CardTitle>Safety status</CardTitle>
-            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-              {[
-                { label: "Road alerts", value: "2 minor", color: t.amber },
-                { label: "Weather warnings", value: "None", color: t.green },
-                { label: "Tourist advisories", value: "None", color: t.green },
-                { label: "Emergency calls", value: "0 active", color: t.green },
-              ].map((item) => (
-                <div key={item.label} style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                  <span style={{ fontSize: 12, color: t.textSub }}>{item.label}</span>
-                  <span style={{ fontSize: 12, fontWeight: 600, color: item.color }}>{item.value}</span>
+              <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                {routeInfo.distance !== "—" && (
+                  <span style={{ fontSize: 11, color: t.textFaint }}>{routeInfo.distance} · {routeInfo.duration} drive</span>
+                )}
+              </div>
+            </div>
+
+            {/* Facility rows */}
+            <div style={{ display: "flex", flexDirection: "column" }}>
+              {FACILITIES.map((f, i) => (
+                <div
+                  key={f.name}
+                  style={{
+                    display: "flex", alignItems: "center", gap: 14,
+                    padding: "13px 18px",
+                    borderBottom: i < FACILITIES.length - 1 ? `0.5px solid ${t.border}` : "none",
+                    background: t.surface,
+                  }}
+                >
+                  {/* Icon */}
+                  <div style={{ width: 40, height: 40, borderRadius: 10, background: t.subtle, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 20, flexShrink: 0 }}>
+                    {f.icon}
+                  </div>
+
+                  {/* Info */}
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 13, fontWeight: 600, color: t.text, marginBottom: 2 }}>{f.name}</div>
+                    <div style={{ fontSize: 11, color: t.textSub, marginBottom: 3 }}>{f.tip}</div>
+                    <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                      <span style={{ fontSize: 10, color: t.textFaint }}>📍 {f.dist}</span>
+                      <span style={{ fontSize: 10, color: t.textFaint }}>· {f.info}</span>
+                    </div>
+                  </div>
+
+                  {/* View button — opens Google Maps with route + facility pinned */}
+                  <button
+                    onClick={() => window.open(facilityRouteUrl(f.search), "_blank")}
+                    style={{
+                      padding: "7px 16px", borderRadius: 8, flexShrink: 0,
+                      border: `0.5px solid ${t.blue}`, background: t.blueLight,
+                      color: t.blue, fontSize: 11, fontWeight: 600, cursor: "pointer",
+                      display: "flex", alignItems: "center", gap: 5,
+                      transition: "all 0.12s",
+                    }}
+                    onMouseEnter={e => { e.currentTarget.style.background = t.blue; e.currentTarget.style.color = "#fff" }}
+                    onMouseLeave={e => { e.currentTarget.style.background = t.blueLight; e.currentTarget.style.color = t.blue }}
+                  >
+                    View
+                  </button>
                 </div>
               ))}
             </div>
           </Card>
-        </div>
-      </div>
+        )
+      })()}
     </div>
   )
 }
 
-function BookingPage() {
-  const { t } = useT()
-  return (
-    <div style={{ padding: "28px 32px", maxWidth: 1100 }}>
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 24 }}>
-        <div>
-          <h1 style={{ fontSize: 22, fontWeight: 700, color: t.text, margin: 0 }}>Book & reserve</h1>
-          <p style={{ fontSize: 13, color: t.textSub, margin: "4px 0 0" }}>Verified hotels in Bagmati Province</p>
-        </div>
-        <div style={{ display: "flex", gap: 8 }}>
-          {["All districts", "Sort by price"].map((label) => (
-            <select key={label} style={{ padding: "7px 14px", borderRadius: 8, border: `0.5px solid ${t.border}`, fontSize: 12, color: t.textMid, background: t.surface, cursor: "pointer", outline: "none" }}>
-              <option>{label}</option>
-            </select>
-          ))}
-        </div>
-      </div>
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 16 }}>
-        {hotels.map((hotel, i) => (
-          <Card key={i} style={{ padding: 0, overflow: "hidden" }}>
-            <div style={{ height: 160, background: t.subtle, position: "relative", overflow: "hidden" }}>
-              <img src={hotel.image} alt={hotel.name} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
-              <div style={{ position: "absolute", top: 10, left: 10, background: "rgba(0,0,0,0.45)", borderRadius: 6, padding: "3px 8px", fontSize: 10, fontWeight: 500, color: "#ffffff", backdropFilter: "blur(4px)" }}>
-                {hotel.tag}
-              </div>
-            </div>
-            <div style={{ padding: 16 }}>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 6 }}>
-                <div>
-                  <div style={{ fontSize: 14, fontWeight: 600, color: t.text, marginBottom: 2 }}>{hotel.name}</div>
-                  <div style={{ fontSize: 11, color: t.textFaint, display: "flex", alignItems: "center", gap: 3 }}>
-                    <MapPin size={9} /> {hotel.location}
-                  </div>
-                </div>
-                <div style={{ textAlign: "right", flexShrink: 0 }}>
-                  <div style={{ fontSize: 14, fontWeight: 700, color: t.blue }}>{hotel.price}</div>
-                  <div style={{ fontSize: 10, color: t.textFaint }}>per night</div>
-                </div>
-              </div>
-              <div style={{ display: "flex", gap: 2, marginBottom: 10 }}>
-                {Array.from({ length: 5 }).map((_, si) => (
-                  <Star key={si} size={12} fill={si < hotel.stars ? t.amber : "none"} color={si < hotel.stars ? t.amber : t.border} />
-                ))}
-                <span style={{ fontSize: 10, color: t.textFaint, marginLeft: 4 }}>{hotel.stars}.0</span>
-              </div>
-              <div style={{ display: "flex", gap: 10, marginBottom: 14 }}>
-                {hotel.amenities.includes("wifi") && <div style={{ display: "flex", alignItems: "center", gap: 3, fontSize: 10, color: t.textSub }}><Wifi size={11} color={t.textFaint} /> Wifi</div>}
-                {hotel.amenities.includes("car") && <div style={{ display: "flex", alignItems: "center", gap: 3, fontSize: 10, color: t.textSub }}><Car size={11} color={t.textFaint} /> Parking</div>}
-                {hotel.amenities.includes("coffee") && <div style={{ display: "flex", alignItems: "center", gap: 3, fontSize: 10, color: t.textSub }}><Coffee size={11} color={t.textFaint} /> Breakfast</div>}
-              </div>
-              <button style={{
-                width: "100%", padding: "8px 0", borderRadius: 8,
-                border: `1px solid ${t.blue}`, background: "transparent",
-                fontSize: 12, fontWeight: 600, color: t.blue, cursor: "pointer",
-                transition: "all 0.15s", display: "flex", alignItems: "center", justifyContent: "center", gap: 5,
-              }}
-              onMouseEnter={(e) => { e.currentTarget.style.background = t.blue; e.currentTarget.style.color = "#ffffff" }}
-              onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; e.currentTarget.style.color = t.blue }}
-              >
-                Reserve now <ArrowRight size={12} />
-              </button>
-            </div>
-          </Card>
-        ))}
-      </div>
-    </div>
-  )
+// ── Nepal places with real GPS coordinates (used for 5km radius detection) ──────
+
+function haversineKm(lat1: number, lon1: number, lat2: number, lon2: number): number {
+  const R = 6371, toRad = (x: number) => x * Math.PI / 180
+  const dL = toRad(lat2 - lat1), dG = toRad(lon2 - lon1)
+  const a = Math.sin(dL/2)**2 + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dG/2)**2
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a))
 }
 
-// ─── AI Planner ───────────────────────────────────────────────────────────────
-
-// ── Destination pool (mirrors what your ML model returns) ──────────────────
-// Shape: { name, category, district, costPerDay, score, highlights, emoji }
-// When your Flask/FastAPI is ready, replace `mockMLRecommend` with a real fetch.
-
-interface Destination {
-  name: string
-  category: string[]
-  district: string
-  costPerDay: number
-  score: number   // 0–1, model confidence / relevance score
-  highlights: string[]
-  emoji: string
+function detectNepalZone(lat: number, lng: number): { district: string; province: string; area: string } {
+  if (lat > 27.4 && lat < 28.1 && lng > 84.9 && lng < 86.2)
+    return { district: "Kathmandu", province: "Bagmati Province", area: "Kathmandu Valley" }
+  if (lat > 27.6 && lat < 27.8 && lng > 85.35 && lng < 85.55)
+    return { district: "Bhaktapur", province: "Bagmati Province", area: "Bhaktapur" }
+  if (lat > 27.6 && lat < 27.75 && lng > 85.25 && lng < 85.38)
+    return { district: "Lalitpur", province: "Bagmati Province", area: "Patan" }
+  if (lat > 28.1 && lat < 28.4 && lng > 83.8 && lng < 84.2)
+    return { district: "Kaski", province: "Gandaki Province", area: "Pokhara" }
+  if (lat > 27.4 && lat < 27.7 && lng > 84.2 && lng < 84.7)
+    return { district: "Chitwan", province: "Bagmati Province", area: "Chitwan" }
+  if (lat > 27.3 && lat < 27.6 && lng > 83.1 && lng < 83.5)
+    return { district: "Rupandehi", province: "Lumbini Province", area: "Lumbini" }
+  if (lat > 27.8 && lat < 28.1 && lng > 83.4 && lng < 83.7)
+    return { district: "Palpa", province: "Lumbini Province", area: "Tansen" }
+  if (lat > 26.6 && lat < 27.0 && lng > 85.7 && lng < 86.2)
+    return { district: "Dhanusha", province: "Madhesh Province", area: "Janakpur" }
+  if (lat > 26.9 && lat < 27.3 && lng > 87.8 && lng < 88.2)
+    return { district: "Ilam", province: "Koshi Province", area: "Ilam" }
+  if (lat > 26.4 && lat < 26.8 && lng > 87.2 && lng < 87.5)
+    return { district: "Sunsari", province: "Koshi Province", area: "Biratnagar" }
+  if (lat > 29.3 && lat < 29.7 && lng > 81.9 && lng < 82.3)
+    return { district: "Mugu", province: "Karnali Province", area: "Rara" }
+  if (lat > 28.6 && lat < 29.0 && lng > 80.4 && lng < 80.8)
+    return { district: "Kanchanpur", province: "Sudurpashchim Province", area: "Dhangadhi" }
+  return { district: "Nepal", province: "Nepal", area: "Your location" }
 }
 
-const destinationPool: Destination[] = [
-  { name: "Pashupatinath Temple", category: ["cultural", "history", "spiritual"], district: "Kathmandu", costPerDay: 800, score: 0.97, highlights: ["UNESCO listed", "Hindu heritage", "Bagmati ghats", "Evening aarti ceremony"], emoji: "🛕" },
-  { name: "Boudhanath Stupa", category: ["cultural", "spiritual", "history"], district: "Kathmandu", costPerDay: 600, score: 0.94, highlights: ["World's largest stupa", "Tibetan Buddhism hub", "Kora circuit", "Thangka galleries"], emoji: "🏛" },
-  { name: "Changu Narayan Temple", category: ["history", "cultural"], district: "Bhaktapur", costPerDay: 700, score: 0.91, highlights: ["Oldest temple in Nepal", "Stone carvings", "Panoramic valley views", "UNESCO site"], emoji: "🏯" },
-  { name: "Namobuddha Monastery", category: ["spiritual", "cultural", "wildlife"], district: "Kavrepalanchok", costPerDay: 900, score: 0.88, highlights: ["Sacred Buddhist site", "Himalayan views", "Tiger legend site", "Peaceful forest trails"], emoji: "🌄" },
-  { name: "Chitwan National Park", category: ["wildlife", "nature"], district: "Chitwan", costPerDay: 2200, score: 0.96, highlights: ["One-horned rhinos", "Bengal tigers", "Jungle safari", "Elephant conservation"], emoji: "🐘" },
-  { name: "Shivapuri Nagarjun Park", category: ["wildlife", "nature", "adventure"], district: "Kathmandu", costPerDay: 500, score: 0.82, highlights: ["Day hikes", "Leopards & langurs", "Bird watching", "City-edge wilderness"], emoji: "🌿" },
-  { name: "Phulchowki Hill", category: ["wildlife", "nature"], district: "Lalitpur", costPerDay: 400, score: 0.78, highlights: ["Highest peak in valley", "250+ bird species", "Rhododendron forests", "Clear Himalaya views"], emoji: "🦅" },
-  { name: "Patan Durbar Square", category: ["history", "cultural", "art"], district: "Lalitpur", costPerDay: 650, score: 0.93, highlights: ["Malla dynasty palace", "Newari architecture", "Bronze casting heritage", "Patan Museum"], emoji: "🏛" },
-  { name: "Bhaktapur Durbar Square", category: ["history", "cultural", "art"], district: "Bhaktapur", costPerDay: 750, score: 0.92, highlights: ["55-Window Palace", "Pottery square", "Peacock windows", "Juju Dhau curd"], emoji: "🏰" },
-  { name: "Godavari Botanical Garden", category: ["nature", "wildlife"], district: "Lalitpur", costPerDay: 350, score: 0.74, highlights: ["900+ plant species", "Orchid house", "Butterfly park", "Picnic grounds"], emoji: "🌸" },
-  { name: "Dakshinkali Temple", category: ["cultural", "spiritual"], district: "Kathmandu", costPerDay: 500, score: 0.80, highlights: ["Tantric goddess shrine", "Forested gorge", "Saturday markets", "Forest hike nearby"], emoji: "🔱" },
-  { name: "Nagarjun Forest Reserve", category: ["wildlife", "nature", "adventure"], district: "Kathmandu", costPerDay: 450, score: 0.76, highlights: ["Dense oak & pine", "Himalayan wildlife", "Stupa at summit", "Short half-day trek"], emoji: "🌲" },
+interface NepalSite {
+  id: string; name: string; emoji: string; category: string
+  region: string; province: string; lat: number; lng: number
+  colorKey: string; type: string
+  driveTime?: string; walkTime?: string; road?: string
+}
+
+const ALL_NEPAL_SITES: NepalSite[] = [
+  // Kathmandu Valley
+  { id:"pashupatinath", name:"Pashupatinath Temple", emoji:"🛕",  category:"Spiritual", region:"Kathmandu",    province:"Bagmati",    lat:27.7109, lng:85.3488, colorKey:"orange", type:"temple"    },
+  { id:"boudhanath",    name:"Boudhanath Stupa",     emoji:"☸️",  category:"Spiritual", region:"Kathmandu",    province:"Bagmati",    lat:27.7215, lng:85.3620, colorKey:"blue",   type:"stupa"     },
+  { id:"swayambhu",     name:"Swayambhunath",        emoji:"🐵",  category:"Spiritual", region:"Kathmandu",    province:"Bagmati",    lat:27.7149, lng:85.2904, colorKey:"blue",   type:"stupa"     },
+  { id:"patan-durbar",  name:"Patan Durbar Square",  emoji:"🏰",  category:"Heritage",  region:"Lalitpur",     province:"Bagmati",    lat:27.6727, lng:85.3246, colorKey:"teal",   type:"heritage"  },
+  { id:"bhaktapur",     name:"Bhaktapur Durbar Sq",  emoji:"🏯",  category:"Heritage",  region:"Bhaktapur",    province:"Bagmati",    lat:27.6710, lng:85.4298, colorKey:"teal",   type:"heritage"  },
+  { id:"changu",        name:"Changu Narayan Temple", emoji:"🛕",  category:"Heritage",  region:"Bhaktapur",    province:"Bagmati",    lat:27.7138, lng:85.4174, colorKey:"amber",  type:"temple"    },
+  { id:"namobuddha",    name:"Namobuddha Monastery", emoji:"🌄",  category:"Buddhist",  region:"Kavrepalanchok",province:"Bagmati",   lat:27.5771, lng:85.5049, colorKey:"green",  type:"monastery" },
+  { id:"shivapuri",     name:"Shivapuri Nat. Park",  emoji:"🌿",  category:"Nature",    region:"Kathmandu",    province:"Bagmati",    lat:27.8025, lng:85.3681, colorKey:"green",  type:"nature"    },
+  { id:"dakshinkali",   name:"Dakshinkali Temple",   emoji:"🔱",  category:"Spiritual", region:"Kathmandu",    province:"Bagmati",    lat:27.5917, lng:85.2404, colorKey:"orange", type:"temple"    },
+  { id:"kopan",         name:"Kopan Monastery",      emoji:"🕌",  category:"Buddhist",  region:"Kathmandu",    province:"Bagmati",    lat:27.7333, lng:85.3654, colorKey:"purple", type:"monastery" },
+  { id:"godavari",      name:"Godavari Garden",      emoji:"🌸",  category:"Nature",    region:"Lalitpur",     province:"Bagmati",    lat:27.5976, lng:85.3701, colorKey:"green",  type:"nature"    },
+  { id:"phulchowki",    name:"Phulchowki Hill",      emoji:"🦅",  category:"Nature",    region:"Lalitpur",     province:"Bagmati",    lat:27.5935, lng:85.3845, colorKey:"green",  type:"viewpoint" },
+  // Pokhara / Gandaki
+  { id:"phewa",         name:"Phewa Lake",            emoji:"🌊",  category:"Nature",    region:"Kaski",        province:"Gandaki",    lat:28.2096, lng:83.9556, colorKey:"blue",   type:"nature"    },
+  { id:"sarangkot",     name:"Sarangkot Viewpoint",  emoji:"🗻",  category:"Viewpoint", region:"Kaski",        province:"Gandaki",    lat:28.2456, lng:83.9568, colorKey:"purple", type:"viewpoint" },
+  { id:"peace-stupa",   name:"World Peace Stupa",    emoji:"☮️",  category:"Spiritual", region:"Kaski",        province:"Gandaki",    lat:28.1905, lng:83.9523, colorKey:"blue",   type:"stupa"     },
+  { id:"davis-falls",   name:"Davis Falls",           emoji:"💧",  category:"Nature",    region:"Kaski",        province:"Gandaki",    lat:28.1930, lng:83.9486, colorKey:"blue",   type:"nature"    },
+  { id:"gupteshwor",    name:"Gupteshwor Cave",      emoji:"🪨",  category:"Heritage",  region:"Kaski",        province:"Gandaki",    lat:28.1935, lng:83.9491, colorKey:"teal",   type:"heritage"  },
+  { id:"begnas",        name:"Begnas Lake",           emoji:"🏞",  category:"Nature",    region:"Kaski",        province:"Gandaki",    lat:28.2029, lng:84.1215, colorKey:"blue",   type:"nature"    },
+  { id:"manakamana",    name:"Manakamana Temple",    emoji:"🛕",  category:"Religious", region:"Gorkha",       province:"Gandaki",    lat:27.9327, lng:84.6053, colorKey:"orange", type:"temple"    },
+  { id:"gorkha-durbar", name:"Gorkha Durbar",         emoji:"🏯",  category:"Heritage",  region:"Gorkha",       province:"Gandaki",    lat:28.0000, lng:84.6333, colorKey:"teal",   type:"heritage"  },
+  { id:"bandipur",      name:"Bandipur Village",      emoji:"🏘",  category:"Heritage",  region:"Tanahun",      province:"Gandaki",    lat:27.9438, lng:84.4166, colorKey:"teal",   type:"heritage"  },
+  { id:"poon-hill",     name:"Poon Hill",             emoji:"⛅",  category:"Trekking",  region:"Myagdi",       province:"Gandaki",    lat:28.3971, lng:83.6966, colorKey:"green",  type:"viewpoint" },
+  // Lumbini
+  { id:"lumbini",       name:"Lumbini Sacred Garden",emoji:"☮",  category:"Spiritual", region:"Rupandehi",    province:"Lumbini",    lat:27.4833, lng:83.2756, colorKey:"blue",   type:"heritage"  },
+  { id:"tansen",        name:"Tansen Durbar",         emoji:"⛩️", category:"Heritage",  region:"Palpa",        province:"Lumbini",    lat:27.8622, lng:83.5430, colorKey:"teal",   type:"heritage"  },
+  { id:"chitwan",       name:"Chitwan National Park", emoji:"🐘",  category:"Wildlife",  region:"Chitwan",      province:"Lumbini",    lat:27.5141, lng:84.3543, colorKey:"green",  type:"nature"    },
+  // Koshi
+  { id:"pathibhara",    name:"Pathibhara Temple",    emoji:"🛕",  category:"Spiritual", region:"Taplejung",    province:"Koshi",      lat:27.7028, lng:87.8967, colorKey:"orange", type:"temple"    },
+  { id:"ilam-tea",      name:"Ilam Tea Garden",      emoji:"🍃",  category:"Nature",    region:"Ilam",         province:"Koshi",      lat:26.9109, lng:87.9277, colorKey:"green",  type:"nature"    },
+  { id:"koshi-tappu",   name:"Koshi Tappu Reserve",  emoji:"🦏",  category:"Wildlife",  region:"Sunsari",      province:"Koshi",      lat:26.6600, lng:87.0900, colorKey:"green",  type:"nature"    },
+  // Madhesh
+  { id:"janaki",        name:"Janaki Mandir",         emoji:"🏛️", category:"Religious", region:"Janakpur",     province:"Madhesh",    lat:26.7286, lng:85.9243, colorKey:"amber",  type:"temple"    },
+  { id:"gadhimai",      name:"Gadhimai Temple",       emoji:"🔱",  category:"Religious", region:"Bara",         province:"Madhesh",    lat:27.0500, lng:85.0830, colorKey:"orange", type:"temple"    },
+  // Karnali
+  { id:"rara-lake",     name:"Rara National Park",   emoji:"🏞",  category:"Nature",    region:"Mugu",         province:"Karnali",    lat:29.5247, lng:82.0856, colorKey:"blue",   type:"nature"    },
+  { id:"dolpo",         name:"Dolpo Region",          emoji:"🏔",  category:"Trekking",  region:"Dolpa",        province:"Karnali",    lat:29.1667, lng:82.8333, colorKey:"purple", type:"viewpoint" },
+  // Sudurpashchim
+  { id:"shuklaphanta",  name:"Shuklaphanta Nat. Park",emoji:"🐆",  category:"Wildlife",  region:"Kanchanpur",   province:"Sudurpashchim",lat:28.8778, lng:80.1733, colorKey:"green", type:"nature"   },
+  { id:"badimalika",    name:"Badimalika Temple",     emoji:"🌺",  category:"Spiritual", region:"Bajura",       province:"Sudurpashchim",lat:29.3500, lng:81.5167, colorKey:"orange",type:"temple"   },
 ]
 
-// ── Mock ML recommend function ─────────────────────────────────────────────
-// TODO: Replace this with your real endpoint when ready:
-//
-//   async function fetchMLRecommend(budget, purposes, days) {
-//     const res = await fetch("http://localhost:5000/recommend", {
-//       method: "POST",
-//       headers: { "Content-Type": "application/json" },
-//       body: JSON.stringify({ budget_per_day: budget / days, purposes, days }),
-//     })
-//     return res.json()  // expects: { destinations: Destination[] }
-//   }
+const NEARBY_CATS   = ["All", "Spiritual", "Heritage", "Nature", "Trekking", "Wildlife", "Buddhist", "Religious", "Viewpoint"]
+const NEARBY_COLORS: Record<string, string> = {
+  blue:"#185FA5", orange:"#D85A30", green:"#3B6D11",
+  amber:"#BA7517", teal:"#1A6B5A",  purple:"#6B3FA0",
+}
+
+function NearbyPage() {
+  const { t, isDark, navigateTo } = useT()
+
+  // GPS state
+  const [gpsStatus,    setGpsStatus]    = useState<"requesting"|"granted"|"denied">("requesting")
+  const [userCoords,   setUserCoords]   = useState<{lat:number;lng:number}|null>(null)
+  const [userLoc,      setUserLoc]      = useState({ district:"—", province:"—", area:"Detecting location…" })
+  const [radius,       setRadius]       = useState<5|10|25|50>(5)
+  const [nearbyPlaces, setNearbyPlaces] = useState<(NepalSite & { dist: number })[]>([])
+  const [selectedId,   setSelectedId]   = useState<string|null>(null)
+  const [activeCat,    setActiveCat]    = useState("All")
+
+  // Map refs
+  const mapDivRef  = useRef<HTMLDivElement>(null)
+  const mapObj     = useRef<any>(null)
+  const circleRef  = useRef<any>(null)
+  const userMarker = useRef<any>(null)
+  const siteMarkers = useRef<any[]>([])
+  const infoWin    = useRef<any>(null)
+
+  // ── 1. Get GPS location ───────────────────────────────────────────────────
+  useEffect(() => {
+    if (!navigator.geolocation) {
+      const fallback = { lat: 27.7172, lng: 85.3240 }  // Kathmandu
+      setUserCoords(fallback)
+      setGpsStatus("denied")
+      setUserLoc(detectNepalZone(fallback.lat, fallback.lng))
+      return
+    }
+    navigator.geolocation.getCurrentPosition(
+      pos => {
+        const c = { lat: pos.coords.latitude, lng: pos.coords.longitude }
+        setUserCoords(c)
+        setGpsStatus("granted")
+        setUserLoc(detectNepalZone(c.lat, c.lng))
+      },
+      () => {
+        const fallback = { lat: 27.7172, lng: 85.3240 }
+        setUserCoords(fallback)
+        setGpsStatus("denied")
+        setUserLoc(detectNepalZone(fallback.lat, fallback.lng))
+      },
+      { enableHighAccuracy: true, timeout: 9000, maximumAge: 0 }
+    )
+  }, [])
+
+  // ── 2. Build map & markers when coords ready or radius changes ────────────
+  useEffect(() => {
+    if (!userCoords || !mapDivRef.current) return
+    loadGMaps(initMap)
+  }, [userCoords, radius, isDark])
+
+  function initMap() {
+    const g = (window as any).google.maps
+    const center = userCoords!
+
+    // Create or reuse map
+    if (!mapObj.current) {
+      mapObj.current = new g.Map(mapDivRef.current, {
+        center, zoom: 14,
+        styles: isDark ? DARK_STYLES : LIGHT_STYLES,
+        disableDefaultUI: true,
+        zoomControl: true,
+        gestureHandling: "greedy",
+      })
+      g.event.trigger(mapObj.current, "resize")
+      infoWin.current = new g.InfoWindow()
+    } else {
+      mapObj.current.setCenter(center)
+    }
+
+    // User location pulsing marker (outer glow circle + inner pin)
+    if (userMarker.current) { userMarker.current.outerCircle?.setMap(null); userMarker.current.pin?.setMap(null) }
+    const outerCircle = new g.Circle({
+      map: mapObj.current, center, radius: 18,
+      fillColor: "#185FA5", fillOpacity: 0.2,
+      strokeColor: "#185FA5", strokeWeight: 1, strokeOpacity: 0.5,
+    })
+    const pin = new g.Marker({
+      position: center, map: mapObj.current,
+      icon: { path: g.SymbolPath.CIRCLE, scale: 9, fillColor: "#185FA5", fillOpacity: 1, strokeColor: "#fff", strokeWeight: 3 },
+      title: "You are here", zIndex: 999,
+    })
+    userMarker.current = { outerCircle, pin }
+
+    // Radius circle
+    if (circleRef.current) circleRef.current.setMap(null)
+    circleRef.current = new g.Circle({
+      map: mapObj.current, center, radius: radius * 1000,
+      fillColor: "#185FA5", fillOpacity: 0.05,
+      strokeColor: "#185FA5", strokeWeight: 1.5, strokeOpacity: 0.7,
+    })
+
+    // Calculate nearby places
+    const nearby = ALL_NEPAL_SITES
+      .map(s => ({ ...s, dist: Math.round(haversineKm(center.lat, center.lng, s.lat, s.lng) * 10) / 10 }))
+      .filter(s => s.dist <= radius)
+      .sort((a, b) => a.dist - b.dist)
+    setNearbyPlaces(nearby)
+    if (nearby.length > 0 && !selectedId) setSelectedId(nearby[0].id)
+
+    // Clear old site markers
+    siteMarkers.current.forEach(m => m.setMap(null))
+    siteMarkers.current = []
+
+    // Add site markers
+    nearby.forEach(site => {
+      const col = NEARBY_COLORS[site.colorKey] || "#185FA5"
+      const isSelected = site.id === selectedId
+      const marker = new g.Marker({
+        position: { lat: site.lat, lng: site.lng },
+        map: mapObj.current,
+        title: site.name,
+        icon: {
+          path: g.SymbolPath.CIRCLE,
+          scale: isSelected ? 10 : 7,
+          fillColor: col, fillOpacity: isSelected ? 1 : 0.85,
+          strokeColor: "#fff", strokeWeight: isSelected ? 3 : 2,
+        },
+        zIndex: isSelected ? 100 : 10,
+      })
+      marker.addListener("click", () => {
+        setSelectedId(site.id)
+        infoWin.current.setContent(
+          `<div style="font-family:Inter,sans-serif;padding:6px 8px 4px">
+            <div style="font-size:13px;font-weight:700;color:#111827">${site.emoji} ${site.name}</div>
+            <div style="font-size:11px;color:#6B7280;margin-top:2px">${site.category} · ${site.region}</div>
+            <div style="font-size:11px;color:#185FA5;margin-top:4px;font-weight:600">📍 ${site.dist} km away</div>
+          </div>`
+        )
+        infoWin.current.open(mapObj.current, marker)
+      })
+      siteMarkers.current.push(marker)
+    })
+
+    // Adjust zoom to fit circle
+    mapObj.current.fitBounds(circleRef.current.getBounds())
+  }
+
+  const filtered = nearbyPlaces.filter(p =>
+    activeCat === "All" || p.category.toLowerCase().includes(activeCat.toLowerCase().slice(0,6))
+  )
+  const selected = nearbyPlaces.find(p => p.id === selectedId)
+
+  function openRoute(site: NepalSite & { dist: number }) {
+    if (!userCoords) return
+    const origin = `${userCoords.lat},${userCoords.lng}`
+    const dest   = `${site.lat},${site.lng}`
+    window.open(`https://www.google.com/maps/dir/?api=1&origin=${origin}&destination=${dest}&travelmode=driving`, "_blank")
+  }
+
+  return (
+    <div style={{ display:"flex", height:"100vh", overflow:"hidden" }}>
+
+      {/* ═══ LEFT: Live Google Map (65%) ═══════════════════════════════════ */}
+      <div style={{ flex:"0 0 65%", position:"relative", background: t.subtle, overflow:"hidden" }}>
+
+        {/* Map container */}
+        <div ref={mapDivRef} style={{ position:"absolute", inset:0 }} />
+
+        {/* GPS location card — top left */}
+        <div style={{ position:"absolute", top:14, left:14, zIndex:10,
+          background:"white", borderRadius:8, padding:"8px 12px",
+          border:"0.5px solid #E5E7EB", boxShadow:"0 1px 6px rgba(0,0,0,0.08)" }}>
+          <div style={{ display:"flex", alignItems:"center", gap:6 }}>
+            <div style={{
+              width:7, height:7, borderRadius:"50%",
+              background: gpsStatus === "granted" ? "#22C55E" : gpsStatus === "denied" ? "#EF4444" : "#F59E0B",
+              flexShrink:0, boxShadow:`0 0 0 3px ${gpsStatus === "granted" ? "rgba(34,197,94,0.2)" : gpsStatus === "denied" ? "rgba(239,68,68,0.2)" : "rgba(245,158,11,0.2)"}`,
+            }} />
+            <span style={{ fontSize:11, fontWeight:600, color:"#111827" }}>
+              {gpsStatus === "requesting" ? "Detecting your GPS…" :
+               gpsStatus === "denied"    ? `Location unavailable · Kathmandu (approx.)` :
+               `Live GPS · ${userLoc.district}`}
+            </span>
+          </div>
+          {gpsStatus !== "requesting" && (
+            <div style={{ fontSize:9, color:"#9CA3AF", marginTop:2, paddingLeft:13 }}>{userLoc.province}</div>
+          )}
+        </div>
+
+        {/* Radius pills — bottom left */}
+        <div style={{ position:"absolute", bottom:16, left:14, zIndex:10, display:"flex", gap:5 }}>
+          {([5,10,25,50] as const).map(r => (
+            <button key={r} onClick={() => setRadius(r)} style={{
+              padding:"5px 12px", borderRadius:20, fontSize:11, fontWeight:600, cursor:"pointer",
+              border:`0.5px solid ${radius===r ? "#185FA5" : "#D1D5DB"}`,
+              background: radius===r ? "#185FA5" : "rgba(255,255,255,0.9)",
+              color: radius===r ? "white" : "#6B7280",
+              backdropFilter:"blur(4px)", transition:"all 0.12s",
+            }}>
+              {r} km
+            </button>
+          ))}
+        </div>
+
+        {/* Place count badge — bottom right */}
+        <div style={{ position:"absolute", bottom:16, right:14, zIndex:10,
+          background:"rgba(255,255,255,0.92)", backdropFilter:"blur(6px)",
+          borderRadius:8, padding:"6px 12px", border:"0.5px solid #E5E7EB",
+          fontSize:11, color:"#374151", fontWeight:600 }}>
+          {nearbyPlaces.length > 0
+            ? `${nearbyPlaces.length} place${nearbyPlaces.length!==1?"s":""} within ${radius} km`
+            : gpsStatus === "requesting" ? "Searching…" : "No places in this radius"}
+        </div>
+
+        {/* No-key placeholder */}
+        {!GMAPS_KEY && (
+          <div style={{ position:"absolute", inset:0, zIndex:20, display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", gap:10, background:"#F0FFF4" }}>
+            <div style={{ fontSize:40 }}>🗺</div>
+            <div style={{ fontSize:13, fontWeight:600, color:"#374151" }}>Add VITE_GOOGLE_MAPS_API_KEY to show live map</div>
+          </div>
+        )}
+      </div>
+
+      {/* ═══ RIGHT: Nearby Panel (35%) ══════════════════════════════════════ */}
+      <div style={{ flex:"0 0 35%", display:"flex", flexDirection:"column", background:"white", borderLeft:"0.5px solid #E5E7EB", overflow:"hidden" }}>
+
+        {/* Header */}
+        <div style={{ padding:"14px 16px 10px", borderBottom:"0.5px solid #E5E7EB", flexShrink:0 }}>
+          <div style={{ display:"flex", alignItems:"flex-start", justifyContent:"space-between", marginBottom:8 }}>
+            <div>
+              <div style={{ fontSize:15, fontWeight:700, color:"#111827" }}>Nearby in Nepal</div>
+              <div style={{ fontSize:11, color:"#6B7280", marginTop:2 }}>
+                {nearbyPlaces.length} place{nearbyPlaces.length!==1?"s":""} within {radius} km radius
+              </div>
+            </div>
+            <button onClick={() => { if (userCoords && mapObj.current) mapObj.current.setCenter(userCoords) }}
+              style={{ padding:"5px 9px", borderRadius:7, border:"0.5px solid #E5E7EB", background:"#F9FAFB", cursor:"pointer", fontSize:11, color:"#185FA5", fontWeight:600 }}>
+              📍 Re-center
+            </button>
+          </div>
+
+          {/* Breadcrumb */}
+          <div style={{ display:"flex", alignItems:"center", gap:4, fontSize:11, color:"#6B7280", marginBottom:10, flexWrap:"wrap" }}>
+            <span>🇳🇵</span>
+            <span>{userLoc.province.replace(" Province","") || "Nepal"}</span>
+            <ChevronRight size={10} color="#9CA3AF" />
+            <span style={{ color:"#374151", fontWeight:600 }}>{userLoc.district}</span>
+            <ChevronRight size={10} color="#9CA3AF" />
+            <span>{userLoc.area.split(",")[0]}</span>
+          </div>
+
+          {/* Category chips */}
+          <div style={{ display:"flex", gap:5, overflowX:"auto", paddingBottom:2 }}>
+            {NEARBY_CATS.map(cat => (
+              <button key={cat} onClick={() => setActiveCat(cat)} style={{
+                padding:"4px 11px", borderRadius:20, fontSize:11, fontWeight:500,
+                whiteSpace:"nowrap", cursor:"pointer", flexShrink:0, transition:"all 0.12s",
+                border:`0.5px solid ${activeCat===cat ? "#185FA5" : "#E5E7EB"}`,
+                background: activeCat===cat ? "#185FA5" : "transparent",
+                color: activeCat===cat ? "white" : "#6B7280",
+              }}>{cat}</button>
+            ))}
+          </div>
+        </div>
+
+        {/* Place cards */}
+        <div style={{ flex:1, overflowY:"auto", padding:"10px 14px" }}>
+          {gpsStatus === "requesting" ? (
+            <div style={{ display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", gap:14, paddingTop:60 }}>
+              <div style={{ fontSize:44 }}>📍</div>
+              <div style={{ fontSize:14, fontWeight:600, color:"#374151", textAlign:"center" }}>Finding places near you…</div>
+              <div style={{ width:160, height:3, background:"#E5E7EB", borderRadius:2, overflow:"hidden" }}>
+                <div style={{ width:"55%", height:"100%", background:"#185FA5", borderRadius:2, animation:"nearbySlide 1.4s ease-in-out infinite" }} />
+              </div>
+            </div>
+          ) : filtered.length === 0 ? (
+            <div style={{ textAlign:"center", padding:"40px 20px" }}>
+              <div style={{ fontSize:32, marginBottom:8 }}>🔍</div>
+              <div style={{ fontSize:13, fontWeight:600, color:"#374151", marginBottom:6 }}>
+                No {activeCat === "All" ? "places" : activeCat.toLowerCase()} within {radius} km
+              </div>
+              <div style={{ fontSize:11, color:"#9CA3AF", marginBottom:14 }}>Try a larger radius</div>
+              <button onClick={() => setRadius(r => (r===5?10:r===10?25:r===25?50:50) as 5|10|25|50)}
+                style={{ padding:"7px 16px", borderRadius:8, border:"0.5px solid #185FA5", background:"transparent", color:"#185FA5", fontSize:12, fontWeight:600, cursor:"pointer" }}>
+                Expand to {radius===5?10:radius===10?25:50} km
+              </button>
+            </div>
+          ) : (
+            filtered.map(place => {
+              const isSelected = place.id === selectedId
+              const col = NEARBY_COLORS[place.colorKey] || "#185FA5"
+              return (
+                <div key={place.id}
+                  onClick={() => {
+                    setSelectedId(place.id)
+                    if (mapObj.current) mapObj.current.panTo({ lat: place.lat, lng: place.lng })
+                  }}
+                  style={{
+                    display:"flex", alignItems:"center", gap:10,
+                    padding:"10px 10px", borderRadius:8, marginBottom:6, cursor:"pointer",
+                    border:`${isSelected?"1.5px":"0.5px"} solid ${isSelected?"#185FA5":"#E5E7EB"}`,
+                    background: isSelected?"#EBF2FB":"white",
+                    borderLeft: isSelected?"3px solid #185FA5":"0.5px solid #E5E7EB",
+                    transition:"all 0.12s",
+                  }}
+                  onMouseEnter={e=>{ if(!isSelected) e.currentTarget.style.background="#F9FAFB" }}
+                  onMouseLeave={e=>{ if(!isSelected) e.currentTarget.style.background="white" }}
+                >
+                  <div style={{ width:36, height:36, borderRadius:8, flexShrink:0, background:col+"18", display:"flex", alignItems:"center", justifyContent:"center", fontSize:18 }}>
+                    {place.emoji}
+                  </div>
+                  <div style={{ flex:1, minWidth:0 }}>
+                    <div style={{ fontSize:13, fontWeight:600, color:"#111827", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
+                      {place.name}
+                    </div>
+                    <div style={{ fontSize:11, color:"#6B7280", marginTop:1 }}>
+                      {place.category} · {place.region}
+                    </div>
+                  </div>
+                  <div style={{ display:"flex", alignItems:"center", gap:5, flexShrink:0 }}>
+                    <span style={{ fontSize:10, fontWeight:600, padding:"2px 7px", borderRadius:10, background:col+"18", color:col }}>
+                      {place.dist} km
+                    </span>
+                    <ChevronRight size={13} color="#9CA3AF" />
+                  </div>
+                </div>
+              )
+            })
+          )}
+        </div>
+
+        {/* Route preview footer */}
+        {selected && gpsStatus !== "requesting" && (
+          <div style={{ padding:"12px 14px", borderTop:"0.5px solid #E5E7EB", flexShrink:0, background:"#FAFAFA" }}>
+            <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:10 }}>
+              <div style={{ width:32, height:32, borderRadius:8, flexShrink:0, background:(NEARBY_COLORS[selected.colorKey]||"#185FA5")+"18", display:"flex", alignItems:"center", justifyContent:"center", fontSize:16 }}>
+                {selected.emoji}
+              </div>
+              <div style={{ flex:1 }}>
+                <div style={{ fontSize:12, fontWeight:700, color:"#111827" }}>{selected.name}</div>
+                <div style={{ display:"flex", gap:8, marginTop:3, flexWrap:"wrap" }}>
+                  <span style={{ fontSize:10, color:"#6B7280" }}>📍 {selected.dist} km</span>
+                  <span style={{ fontSize:10, color:"#6B7280" }}>🚗 ~{Math.ceil(selected.dist/0.4)} min</span>
+                  <span style={{ fontSize:10, color:"#6B7280" }}>🚶 ~{Math.ceil(selected.dist/0.08)} min</span>
+                  <span style={{ fontSize:10, color:"#3B6D11" }}>● {selected.province}</span>
+                </div>
+              </div>
+            </div>
+            <div style={{ display:"flex", gap:7 }}>
+              <button
+                onClick={() => {
+                  const origin = userCoords
+                    ? `${userCoords.lat.toFixed(6)},${userCoords.lng.toFixed(6)}`
+                    : userLoc.area + ", Nepal"
+                  navigateTo("pathfinder", {
+                    origin,
+                    dest: `${selected.name}, ${selected.region}, Nepal`,
+                  })
+                }}
+                style={{ flex:1, padding:"8px 0", borderRadius:8, border:"none", background:"#185FA5", color:"white", fontSize:11, fontWeight:700, cursor:"pointer" }}
+              >
+                🗺 Navigate in Pathfinder
+              </button>
+              <button onClick={() => window.open(`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(selected.name + " " + selected.region + " Nepal")}`, "_blank")}
+                style={{ flex:1, padding:"8px 0", borderRadius:8, border:"0.5px solid #185FA5", background:"transparent", color:"#185FA5", fontSize:11, fontWeight:600, cursor:"pointer" }}>
+                View details
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+
+      <style>{`
+        @keyframes nearbySlide { 0%{transform:translateX(-180px)} 100%{transform:translateX(180px)} }
+      `}</style>
+    </div>
+  )
+}
+
+
+
+function BookingPage() {
+  const { t, isDark, navigateTo } = useT()
+
+  // ── GPS detection ─────────────────────────────────────────────────────────
+  const [gpsStatus,   setGpsStatus]   = useState<"requesting"|"granted"|"denied">("requesting")
+  const [userCoords,  setUserCoords]  = useState<{lat:number;lng:number}|null>(null)
+  const [userLoc,     setUserLoc]     = useState({ area:"Detecting…", district:"—", province:"—" })
+
+  // ── UI state ──────────────────────────────────────────────────────────────
+  const [activeTab,   setActiveTab]   = useState<"all"|"hotels"|"restaurants">("all")
+  const [loading,     setLoading]     = useState(true)
+  const [places,      setPlaces]      = useState<any[]>([])
+  const [selectedId,  setSelectedId]  = useState<string|null>(null)
+
+  // Refs for maps
+  const hiddenRef  = useRef<HTMLDivElement>(null)   // invisible div for PlacesService
+  const mapRef     = useRef<HTMLDivElement>(null)   // visible right-side map
+  const mapObj     = useRef<any>(null)
+  const markersRef = useRef<any[]>([])
+
+  // ── 1. Get GPS ────────────────────────────────────────────────────────────
+  useEffect(() => {
+    const fallback = { lat: 27.7172, lng: 85.3240 }
+    if (!navigator.geolocation) {
+      setUserCoords(fallback); setGpsStatus("denied")
+      setUserLoc(detectNepalZone(fallback.lat, fallback.lng)); return
+    }
+    navigator.geolocation.getCurrentPosition(
+      pos => {
+        const c = { lat: pos.coords.latitude, lng: pos.coords.longitude }
+        setUserCoords(c); setGpsStatus("granted")
+        setUserLoc(detectNepalZone(c.lat, c.lng))
+      },
+      () => {
+        setUserCoords(fallback); setGpsStatus("denied")
+        setUserLoc(detectNepalZone(fallback.lat, fallback.lng))
+      },
+      { enableHighAccuracy: true, timeout: 9000, maximumAge: 0 }
+    )
+  }, [])
+
+  // ── 2. Search Places API when coords ready or tab changes ─────────────────
+  useEffect(() => {
+    if (!userCoords || !hiddenRef.current) return
+    loadGMaps(() => searchNearby(userCoords))
+  }, [userCoords, activeTab])
+
+  function searchNearby(coords: {lat:number;lng:number}) {
+    const g = (window as any).google.maps
+    setLoading(true)
+
+    // PlacesService requires a Map element — use a hidden 1px div
+    const tempMap = new g.Map(hiddenRef.current, { center: coords, zoom: 14 })
+    const svc = new g.places.PlacesService(tempMap)
+
+    const types = activeTab === "hotels"      ? ["lodging"] :
+                  activeTab === "restaurants" ? ["restaurant"] :
+                  ["lodging", "restaurant"]
+
+    const search = (type: string): Promise<any[]> =>
+      new Promise(resolve =>
+        svc.nearbySearch(
+          { location: coords, radius: 3000, type },
+          (results: any[], status: string) => resolve(status === "OK" ? results : [])
+        )
+      )
+
+    Promise.all(types.map(search)).then(all => {
+      const merged = all.flat()
+      // Deduplicate
+      const unique = Array.from(new Map(merged.map(p => [p.place_id, p])).values())
+      // Add real distance
+      const withDist = unique
+        .map(p => ({
+          ...p,
+          dist: Math.round(haversineKm(coords.lat, coords.lng,
+                  p.geometry.location.lat(), p.geometry.location.lng()) * 10) / 10,
+        }))
+        .sort((a, b) => a.dist - b.dist)
+        .slice(0, 18)
+
+      setPlaces(withDist)
+      setLoading(false)
+
+      // Init/update right-side map
+      initRightMap(coords, withDist)
+    })
+  }
+
+  function initRightMap(coords: {lat:number;lng:number}, nearby: any[]) {
+    if (!mapRef.current) return
+    const g = (window as any).google.maps
+
+    if (!mapObj.current) {
+      mapObj.current = new g.Map(mapRef.current, {
+        center: coords, zoom: 14,
+        styles: isDark ? DARK_STYLES : LIGHT_STYLES,
+        disableDefaultUI: true, zoomControl: true,
+      })
+      g.event.trigger(mapObj.current, "resize")
+      // User pin
+      new g.Marker({
+        position: coords, map: mapObj.current, zIndex: 999,
+        icon: { path: g.SymbolPath.CIRCLE, scale: 9,
+          fillColor: "#185FA5", fillOpacity: 1, strokeColor: "#fff", strokeWeight: 3 },
+      })
+    }
+
+    // Clear old markers
+    markersRef.current.forEach(m => m.setMap(null))
+    markersRef.current = []
+
+    // Add place markers
+    nearby.forEach(place => {
+      const isHotel = place.types?.includes("lodging")
+      const col = isHotel ? "#185FA5" : "#D85A30"
+      const m = new g.Marker({
+        position: place.geometry.location,
+        map: mapObj.current, title: place.name,
+        icon: { path: g.SymbolPath.CIRCLE, scale: 7,
+          fillColor: col, fillOpacity: 0.9, strokeColor: "#fff", strokeWeight: 2 },
+      })
+      m.addListener("click", () => setSelectedId(place.place_id))
+      markersRef.current.push(m)
+    })
+  }
+
+  // ── Helpers ───────────────────────────────────────────────────────────────
+  function getPhoto(place: any): string | null {
+    try { return place.photos?.[0]?.getUrl({ maxWidth: 500, maxHeight: 220 }) ?? null }
+    catch { return null }
+  }
+
+  function priceLabel(lvl: number | undefined): string {
+    if (lvl === undefined || lvl === null) return ""
+    const labels = ["Free","Budget","Mid-range","Upscale","Luxury"]
+    return labels[Math.min(lvl, 4)] || ""
+  }
+
+  function ratingStars(r: number | undefined): string {
+    const n = Math.round(r || 0)
+    return "★".repeat(n) + "☆".repeat(5 - n)
+  }
+
+  function openInMaps(place: any) {
+    window.open(`https://www.google.com/maps/place/?q=place_id:${place.place_id}`, "_blank")
+  }
+
+  function getDirections(place: any) {
+    if (!userCoords) return
+    navigateTo("pathfinder", {
+      origin: `${userCoords.lat.toFixed(6)},${userCoords.lng.toFixed(6)}`,
+      dest:   `${place.name}, ${place.vicinity || "Nepal"}`,
+    })
+  }
+
+  const isHotelPlace = (p: any) => p.types?.includes("lodging")
+  const isRestPlace  = (p: any) => p.types?.some((t: string) => ["restaurant","food","cafe","bakery","bar"].includes(t))
+  const selected = places.find(p => p.place_id === selectedId)
+
+  return (
+    <div style={{ display:"flex", height:"100vh", overflow:"hidden" }}>
+
+      {/* Invisible div for PlacesService */}
+      <div ref={hiddenRef} style={{ position:"fixed", width:1, height:1, opacity:0, pointerEvents:"none", left:-9999 }} />
+
+      {/* ── LEFT: Cards (65%) ──────────────────────────────────────────────── */}
+      <div style={{ flex:"0 0 65%", display:"flex", flexDirection:"column", overflow:"hidden", borderRight:`0.5px solid ${t.border}` }}>
+
+        {/* Header */}
+        <div style={{ padding:"18px 20px 14px", borderBottom:`0.5px solid ${t.border}`, background:t.surface, flexShrink:0 }}>
+          <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:12 }}>
+            <div>
+              <h1 style={{ fontSize:18, fontWeight:700, color:t.text, margin:0 }}>Book & Reserve</h1>
+              <div style={{ fontSize:11, color:t.textSub, marginTop:3, display:"flex", alignItems:"center", gap:6 }}>
+                <div style={{ width:6, height:6, borderRadius:"50%",
+                  background: gpsStatus==="granted" ? "#22C55E" : gpsStatus==="denied" ? "#EF4444" : "#F59E0B",
+                  flexShrink:0 }} />
+                {gpsStatus==="requesting" ? "Detecting your location…" :
+                 gpsStatus==="denied"     ? `Location unavailable · Showing Kathmandu` :
+                 `Near ${userLoc.area}, ${userLoc.district}`}
+              </div>
+            </div>
+            <div style={{ fontSize:12, color:t.textFaint }}>
+              {loading ? "Searching…" : `${places.length} places found`}
+            </div>
+          </div>
+
+          {/* Tab filter */}
+          <div style={{ display:"flex", gap:6 }}>
+            {(["all","hotels","restaurants"] as const).map(tab => (
+              <button key={tab} onClick={() => setActiveTab(tab)} style={{
+                padding:"6px 16px", borderRadius:20, fontSize:12, fontWeight:500,
+                cursor:"pointer", transition:"all 0.12s",
+                border:`0.5px solid ${activeTab===tab ? t.blue : t.border}`,
+                background: activeTab===tab ? t.blue : t.surface,
+                color: activeTab===tab ? "#fff" : t.textSub,
+              }}>
+                {tab==="all"?"🏨🍽 All":tab==="hotels"?"🏨 Hotels":"🍽 Restaurants"}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* Cards */}
+        <div style={{ flex:1, overflowY:"auto", padding:16 }}>
+
+          {loading ? (
+            <div style={{ display:"grid", gridTemplateColumns:"repeat(2,1fr)", gap:12 }}>
+              {Array.from({length:6}).map((_,i) => (
+                <div key={i} style={{ borderRadius:12, border:`0.5px solid ${t.border}`, overflow:"hidden", background:t.surface }}>
+                  <div style={{ height:160, background:t.subtle, animation:"shimmer 1.5s ease-in-out infinite" }} />
+                  <div style={{ padding:14 }}>
+                    <div style={{ height:13, background:t.subtle, borderRadius:4, marginBottom:8, width:"70%" }} />
+                    <div style={{ height:10, background:t.subtle, borderRadius:4, width:"50%" }} />
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : places.length === 0 ? (
+            <div style={{ textAlign:"center", padding:"60px 20px" }}>
+              <div style={{ fontSize:40, marginBottom:12 }}>🔍</div>
+              <div style={{ fontSize:14, fontWeight:600, color:t.textMid, marginBottom:6 }}>No places found nearby</div>
+              <div style={{ fontSize:12, color:t.textSub }}>Try switching to a different category or check your location</div>
+            </div>
+          ) : (
+            <div style={{ display:"grid", gridTemplateColumns:"repeat(2,1fr)", gap:12 }}>
+              {places.map(place => {
+                const photo      = getPhoto(place)
+                const isSelected = place.place_id === selectedId
+                const isHotel    = isHotelPlace(place)
+                const accentCol  = isHotel ? t.blue : t.orange
+                const accentBg   = isHotel ? t.blueLight : t.orangeLight
+
+                return (
+                  <div key={place.place_id}
+                    onClick={() => { setSelectedId(place.place_id); if (mapObj.current) mapObj.current.panTo(place.geometry.location) }}
+                    style={{
+                      borderRadius:12, overflow:"hidden", cursor:"pointer",
+                      border:`${isSelected?"1.5px":"0.5px"} solid ${isSelected ? t.blue : t.border}`,
+                      background:t.surface, transition:"all 0.15s",
+                      boxShadow: isSelected ? `0 0 0 2px ${t.blueLight}` : "none",
+                    }}
+                  >
+                    {/* Photo or placeholder */}
+                    <div style={{ height:150, background:t.subtle, position:"relative", overflow:"hidden" }}>
+                      {photo ? (
+                        <img src={photo} alt={place.name}
+                          style={{ width:"100%", height:"100%", objectFit:"cover" }}
+                          onError={e => { (e.target as HTMLImageElement).style.display="none" }}
+                        />
+                      ) : (
+                        <div style={{ width:"100%", height:"100%", display:"flex", alignItems:"center", justifyContent:"center", fontSize:42 }}>
+                          {isHotel ? "🏨" : "🍽"}
+                        </div>
+                      )}
+                      {/* Type + distance badge */}
+                      <div style={{ position:"absolute", top:8, left:8, display:"flex", gap:4 }}>
+                        <span style={{ background:accentCol, color:"#fff", borderRadius:6, padding:"2px 8px", fontSize:9, fontWeight:700 }}>
+                          {isHotel ? "Hotel" : "Restaurant"}
+                        </span>
+                      </div>
+                      <div style={{ position:"absolute", top:8, right:8 }}>
+                        <span style={{ background:"rgba(0,0,0,0.6)", color:"#fff", borderRadius:6, padding:"2px 8px", fontSize:9, fontWeight:600 }}>
+                          📍 {place.dist} km
+                        </span>
+                      </div>
+                      {/* Open/closed status omitted — open_now field is deprecated */}
+                    </div>
+
+                    {/* Info */}
+                    <div style={{ padding:"12px 14px" }}>
+                      <div style={{ fontSize:13, fontWeight:700, color:t.text, marginBottom:4,
+                        overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
+                        {place.name}
+                      </div>
+
+                      {/* Rating + price */}
+                      <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:5 }}>
+                        {place.rating && (
+                          <div style={{ display:"flex", alignItems:"center", gap:3 }}>
+                            <span style={{ color:"#F59E0B", fontSize:11 }}>{ratingStars(place.rating)}</span>
+                            <span style={{ fontSize:10, color:t.textSub, fontWeight:600 }}>{place.rating.toFixed(1)}</span>
+                            {place.user_ratings_total && (
+                              <span style={{ fontSize:9, color:t.textFaint }}>({place.user_ratings_total})</span>
+                            )}
+                          </div>
+                        )}
+                        {place.price_level !== undefined && (
+                          <span style={{ fontSize:10, color:accentCol, fontWeight:600,
+                            background:accentBg, borderRadius:4, padding:"1px 6px" }}>
+                            {priceLabel(place.price_level)}
+                          </span>
+                        )}
+                      </div>
+
+                      {/* Address */}
+                      {place.vicinity && (
+                        <div style={{ fontSize:10, color:t.textSub, marginBottom:10,
+                          overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
+                          📍 {place.vicinity}
+                        </div>
+                      )}
+
+                      {/* Buttons */}
+                      <div style={{ display:"flex", gap:6 }}>
+                        <button
+                          onClick={e => { e.stopPropagation(); getDirections(place) }}
+                          style={{ flex:1, padding:"7px 0", borderRadius:7, border:"none",
+                            background:t.blue, color:"#fff", fontSize:10, fontWeight:700, cursor:"pointer" }}>
+                          🗺 Directions
+                        </button>
+                        <button
+                          onClick={e => { e.stopPropagation(); openInMaps(place) }}
+                          style={{ flex:1, padding:"7px 0", borderRadius:7,
+                            border:`0.5px solid ${t.border}`, background:t.surface,
+                            color:t.textMid, fontSize:10, fontWeight:600, cursor:"pointer" }}>
+                          View details
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* ── RIGHT: Live Map (35%) ────────────────────────────────────────────── */}
+      <div style={{ flex:"0 0 35%", display:"flex", flexDirection:"column", overflow:"hidden" }}>
+
+        {/* Map */}
+        <div ref={mapRef} style={{ flex:1 }} />
+
+        {/* Selected place detail card */}
+        {selected && !loading && (
+          <div style={{ padding:"12px 14px", borderTop:`0.5px solid ${t.border}`, background:t.surface, flexShrink:0 }}>
+            <div style={{ display:"flex", gap:10, marginBottom:10 }}>
+              <div style={{ width:38, height:38, borderRadius:8, flexShrink:0, fontSize:22,
+                display:"flex", alignItems:"center", justifyContent:"center",
+                background: isHotelPlace(selected) ? t.blueLight : t.orangeLight }}>
+                {isHotelPlace(selected) ? "🏨" : "🍽"}
+              </div>
+              <div style={{ flex:1, minWidth:0 }}>
+                <div style={{ fontSize:13, fontWeight:700, color:t.text,
+                  overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
+                  {selected.name}
+                </div>
+                <div style={{ fontSize:11, color:t.textSub, marginTop:2 }}>
+                  {selected.rating && <span style={{ color:"#F59E0B" }}>★ {selected.rating.toFixed(1)} · </span>}
+                  📍 {selected.dist} km · {priceLabel(selected.price_level) || "—"}
+                </div>
+              </div>
+            </div>
+            <div style={{ display:"flex", gap:7 }}>
+              <button onClick={() => getDirections(selected)}
+                style={{ flex:1, padding:"8px 0", borderRadius:8, border:"none",
+                  background:t.blue, color:"#fff", fontSize:11, fontWeight:700, cursor:"pointer" }}>
+                🗺 Navigate in Pathfinder
+              </button>
+              <button onClick={() => openInMaps(selected)}
+                style={{ flex:1, padding:"8px 0", borderRadius:8,
+                  border:`0.5px solid ${t.blue}`, background:"transparent",
+                  color:t.blue, fontSize:11, fontWeight:600, cursor:"pointer" }}>
+                Open in Maps
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* No-key placeholder */}
+        {!GMAPS_KEY && (
+          <div style={{ position:"absolute", inset:0, zIndex:20, display:"flex", flexDirection:"column",
+            alignItems:"center", justifyContent:"center", gap:10, background:t.subtle }}>
+            <div style={{ fontSize:36 }}>🗺</div>
+            <div style={{ fontSize:12, color:t.textMid, textAlign:"center", maxWidth:200 }}>
+              Add VITE_GOOGLE_MAPS_API_KEY to show the live map
+            </div>
+          </div>
+        )}
+      </div>
+
+      <style>{`
+        @keyframes shimmer {
+          0%,100% { opacity:1 } 50% { opacity:0.5 }
+        }
+      `}</style>
+    </div>
+  )
+}
+
+
+// ── Local mock fallbacks (used when both Flask backend and Supabase are offline) ─
 
 function mockMLRecommend(budget: number, purposes: string[], days: number): Destination[] {
-  const budgetPerDay = budget / Math.max(days, 1)
-
-  return destinationPool
-    .filter((d) => {
-      const purposeMatch = purposes.length === 0 || purposes.some((p) => d.category.includes(p))
-      const affordable = d.costPerDay <= budgetPerDay * 1.3
-      return purposeMatch && affordable
-    })
-    .map((d) => {
-      // Boost score by budget fit and purpose overlap
-      const overlapRatio = purposes.length === 0 ? 1 : purposes.filter((p) => d.category.includes(p)).length / purposes.length
-      const budgetFit = Math.min(1, budgetPerDay / d.costPerDay)
-      return { ...d, score: Math.min(0.99, d.score * (0.6 + 0.2 * overlapRatio + 0.2 * budgetFit)) }
+  const pool: Destination[] = [
+    { name:"Pashupatinath Temple", district:"Kathmandu",      province:"Bagmati",   categories:["cultural","spiritual"], costPerDay:800,  score:0.95, emoji:"🛕", highlights:["UNESCO listed","Hindu heritage","Evening aarti"] },
+    { name:"Boudhanath Stupa",     district:"Kathmandu",      province:"Bagmati",   categories:["cultural","spiritual"], costPerDay:600,  score:0.92, emoji:"🏛", highlights:["World's largest stupa","Kora circuit"] },
+    { name:"Changu Narayan",       district:"Bhaktapur",      province:"Bagmati",   categories:["history","cultural"],   costPerDay:700,  score:0.88, emoji:"🏯", highlights:["Oldest temple","UNESCO site"] },
+    { name:"Namobuddha Monastery", district:"Kavrepalanchok", province:"Bagmati",   categories:["spiritual","nature"],   costPerDay:900,  score:0.85, emoji:"🌄", highlights:["Sacred Buddhist site","Forest trails"] },
+    { name:"Chitwan National Park",district:"Chitwan",        province:"Lumbini",   categories:["wildlife","nature"],    costPerDay:2200, score:0.90, emoji:"🐘", highlights:["One-horned rhinos","Jungle safari"] },
+    { name:"Phewa Lake Pokhara",   district:"Kaski",          province:"Gandaki",   categories:["nature","cultural"],    costPerDay:1200, score:0.87, emoji:"🌊", highlights:["Boating","Paragliding","Peace Pagoda"] },
+    { name:"Lumbini Sacred Garden",district:"Rupandehi",      province:"Lumbini",   categories:["spiritual","history"],  costPerDay:600,  score:0.84, emoji:"☮",  highlights:["Buddha birthplace","UNESCO site"] },
+    { name:"Annapurna Base Camp",  district:"Kaski",          province:"Gandaki",   categories:["adventure","nature"],   costPerDay:2800, score:0.91, emoji:"🏔", highlights:["Himalayan panorama","World-class trek"] },
+  ]
+  const daily = budget / Math.max(days, 1)
+  return pool
+    .filter(d => {
+      const affordable = d.costPerDay <= daily * 1.4
+      const match = purposes.length === 0 || purposes.some(p => d.categories.includes(p))
+      return affordable && match
     })
     .sort((a, b) => b.score - a.score)
     .slice(0, 6)
 }
 
+function mockGenerateItinerary(dest: Destination, days: number, from: string): DayPlan[] {
+  const templates: Record<string, Activity[]> = {
+    cultural:  [
+      { time:"08:00", title:`Visit ${dest.name}`, note:"Arrive early to avoid crowds", icon:"🏛", cost:600 },
+      { time:"10:30", title:"Guided heritage walk", note:"Local guide available (Rs 800)", icon:"🎒", cost:800 },
+      { time:"13:00", title:"Traditional Newari lunch", note:"Budget Rs 400–600", icon:"🍽", cost:500 },
+      { time:"15:00", title:"Photography walk", note:"Golden hour at 16:30", icon:"📸", cost:0 },
+      { time:"18:30", title:"Evening ceremony", note:"Check local schedule", icon:"🪔", cost:150 },
+    ],
+    spiritual: [
+      { time:"06:30", title:"Sunrise prayer", note:"Respectful dress required", icon:"🙏", cost:100 },
+      { time:"09:00", title:"Kora circuit", note:"3 km walking circuit", icon:"⭕", cost:0 },
+      { time:"13:00", title:"Monastery meal", note:"Simple vegetarian", icon:"🌱", cost:200 },
+      { time:"15:00", title:"Meditation session", note:"Guided, 60 min", icon:"🧘", cost:300 },
+    ],
+    nature:    [
+      { time:"07:00", title:"Morning hike", note:"Bring water and layers", icon:"🌄", cost:200 },
+      { time:"12:00", title:"Picnic lunch", note:"Pack from market", icon:"🧺", cost:300 },
+      { time:"14:00", title:"Wildlife spotting", note:"Best with a guide", icon:"🦋", cost:400 },
+    ],
+    adventure: [
+      { time:"07:00", title:"Trek start", note:"Pack warm layers", icon:"🥾", cost:200 },
+      { time:"13:00", title:"Summit lunch", note:"Bring packed food", icon:"🍜", cost:250 },
+      { time:"17:00", title:"Camp setup", note:"With guide", icon:"⛺", cost:900 },
+    ],
+    wildlife:  [
+      { time:"06:00", title:"Dawn safari", note:"Best sighting time", icon:"🐘", cost:1500 },
+      { time:"12:00", title:"Camp lunch", note:"Included with safari", icon:"🍱", cost:350 },
+      { time:"16:30", title:"Jeep safari", note:"Open grasslands", icon:"🚙", cost:1200 },
+    ],
+  }
+  const primary = dest.categories?.[0] ?? "cultural"
+  const acts = templates[primary] ?? templates.cultural
+  const sameCity = from.toLowerCase().includes(dest.district.toLowerCase())
+  const travelCost = sameCity ? 250 : 900
+  const accCost = Math.max(1200, Math.min(3500, dest.costPerDay * 0.7))
 
-
-const PURPOSE_OPTIONS = [
-  { id: "cultural", label: "Cultural sites", icon: <Landmark size={13} /> },
-  { id: "wildlife", label: "Wildlife", icon: <TreePine size={13} /> },
-  { id: "history", label: "History", icon: <Scroll size={13} /> },
-  { id: "spiritual", label: "Spiritual", icon: <Star size={13} /> },
-  { id: "nature", label: "Nature", icon: <Camera size={13} /> },
-  { id: "adventure", label: "Adventure", icon: <MapPinned size={13} /> },
-]
+  return Array.from({ length: days }, (_, d) => {
+    const dayActs: Activity[] = []
+    if (d === 0) dayActs.push({ time:"07:30", title:`Travel to ${dest.district}`, note:`From ${from}`, icon:"🚌", cost:travelCost })
+    dayActs.push(...acts.slice((d * 2) % acts.length, (d * 2) % acts.length + 3))
+    if (d < days - 1) dayActs.push({ time:"20:00", title:"Check-in & dinner", note:`Rs ${Math.round(accCost).toLocaleString()}/night`, icon:"🏨", cost:accCost + 400 })
+    else dayActs.push({ time:"17:00", title:`Return to ${from}`, note:"Depart early", icon:"🏠", cost:travelCost })
+    return { day: d + 1, theme: d === 0 ? `Arrival & first impressions` : `${dest.name} — day ${d + 1}`, activities: dayActs, totalCost: dayActs.reduce((s, a) => s + a.cost, 0) }
+  })
+}
 
 function ScoreBar({ score, color }: { score: number; color: string }) {
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
       <div style={{ flex: 1, height: 4, borderRadius: 4, background: "rgba(0,0,0,0.08)", overflow: "hidden" }}>
-        <div style={{ width: `${score * 100}%`, height: "100%", background: color, borderRadius: 4, transition: "width 0.6s ease" }} />
+        <div style={{ width: `${Math.round(score * 100)}%`, height: "100%", background: color, borderRadius: 4, transition: "width 0.5s ease" }} />
       </div>
-      <span style={{ fontSize: 10, fontWeight: 600, color, minWidth: 32 }}>{Math.round(score * 100)}%</span>
+      <span style={{ fontSize: 10, fontWeight: 600, color, minWidth: 30 }}>{Math.round(score * 100)}%</span>
     </div>
   )
 }
 
-// ─── Itinerary types & generator ─────────────────────────────────────────────
-
-interface Activity { time: string; title: string; note: string; icon: string; cost: number }
-interface DayPlan { day: number; theme: string; activities: Activity[]; totalCost: number }
-
-const activityLib: Record<string, Activity[]> = {
-  cultural: [
-    { time: "07:30", title: "Morning temple visit", note: "Arrive early to avoid crowds", icon: "🛕", cost: 600 },
-    { time: "09:30", title: "Guided heritage walk", note: "English guide available (Rs 800)", icon: "🎒", cost: 800 },
-    { time: "12:30", title: "Traditional Newari lunch", note: "Budget Rs 400–600 per person", icon: "🍽", cost: 500 },
-    { time: "14:30", title: "Architecture & photography walk", note: "Self-guided, free entry", icon: "📸", cost: 0 },
-    { time: "16:30", title: "Local craft & souvenir market", note: "Thangka, pottery, pashmina", icon: "🛍", cost: 400 },
-    { time: "18:30", title: "Evening aarti ceremony", note: "Check local schedule for timings", icon: "🪔", cost: 150 },
-  ],
-  wildlife: [
-    { time: "06:00", title: "Dawn wildlife safari", note: "Best sighting time — bring binoculars", icon: "🐘", cost: 1500 },
-    { time: "09:00", title: "Guided nature trail", note: "Trained naturalist escort", icon: "🌿", cost: 600 },
-    { time: "12:00", title: "Camp lunch at forest lodge", note: "Included with most safari packages", icon: "🍱", cost: 350 },
-    { time: "14:00", title: "Bird watching session", note: "200+ species documented in this zone", icon: "🦅", cost: 400 },
-    { time: "16:30", title: "Jeep safari — open grasslands", note: "Rhino and deer sightings common", icon: "🚙", cost: 1200 },
-    { time: "19:00", title: "Campfire & cultural evening", note: "Resort activity, no charge", icon: "🔥", cost: 0 },
-  ],
-  history: [
-    { time: "08:30", title: "Historian-led site tour", note: "Inscriptions and stone carvings", icon: "🏯", cost: 700 },
-    { time: "10:30", title: "Museum & archive visit", note: "Audio guide in English available", icon: "🔍", cost: 300 },
-    { time: "13:00", title: "Heritage lunch spot", note: "Courtyard dining, traditional setting", icon: "🍽", cost: 500 },
-    { time: "15:00", title: "Ancient carving trail", note: "UNESCO documentation on site", icon: "🗿", cost: 0 },
-    { time: "17:00", title: "Sunset viewpoint", note: "Panoramic valley views, free", icon: "🌅", cost: 0 },
-    { time: "19:00", title: "Documentary screening", note: "Lodge usually shows local history film", icon: "🎞", cost: 0 },
-  ],
-  spiritual: [
-    { time: "06:30", title: "Sunrise prayer ceremony", note: "Respectful dress required", icon: "🙏", cost: 100 },
-    { time: "09:00", title: "Kora (circumambulation) circuit", note: "3 km walking circuit around stupa", icon: "⭕", cost: 0 },
-    { time: "11:00", title: "Guided meditation session", note: "Monastery offers 60-min sessions", icon: "🧘", cost: 300 },
-    { time: "13:00", title: "Vegetarian monastery meal", note: "Simple, nourishing, and included", icon: "🌱", cost: 200 },
-    { time: "15:00", title: "Thangka painting workshop", note: "2-hour beginner-friendly session", icon: "🎨", cost: 800 },
-    { time: "17:30", title: "Evening prayers (puja)", note: "Open to respectful visitors", icon: "🕯", cost: 0 },
-  ],
-  nature: [
-    { time: "07:00", title: "Sunrise ridge hike", note: "Bring layers and 1.5 L water", icon: "🌄", cost: 200 },
-    { time: "09:30", title: "Botanical garden trail", note: "900+ plant species identified", icon: "🌸", cost: 150 },
-    { time: "12:00", title: "Viewpoint picnic lunch", note: "Pack from nearest town market", icon: "🧺", cost: 300 },
-    { time: "14:00", title: "Butterfly & bird spotting", note: "Best in spring and autumn", icon: "🦋", cost: 0 },
-    { time: "16:00", title: "Forest bathing walk", note: "Guided mindful nature walk", icon: "🌲", cost: 250 },
-    { time: "18:00", title: "Evening at lodge viewpoint", note: "Clear Himalaya views on cloudless days", icon: "🏔", cost: 0 },
-  ],
-  adventure: [
-    { time: "07:00", title: "Mountain biking trail run", note: "Rental available at trailhead Rs 600", icon: "🚵", cost: 600 },
-    { time: "09:30", title: "Rock scramble ascent", note: "Certified guide strongly recommended", icon: "⛰", cost: 700 },
-    { time: "12:30", title: "Summit lunch", note: "Bring packed dal-bhat from valley", icon: "🥾", cost: 200 },
-    { time: "14:00", title: "Rappelling / zip-line session", note: "Safety gear and briefing included", icon: "🪂", cost: 900 },
-    { time: "17:00", title: "Recovery & hot meal", note: "Local restaurant, dal-bhat Rs 250", icon: "🍜", cost: 350 },
-    { time: "19:00", title: "Gear debrief & planning day 2", note: "With your guide at camp", icon: "🗺", cost: 0 },
-  ],
-}
-
-function mockGenerateItinerary(dest: Destination, days: number, from: string): DayPlan[] {
-  const sameDistrict = dest.district.toLowerCase().includes("kathmandu") && from.toLowerCase().includes("kathmandu")
-  const travelCost = sameDistrict ? 250 : 900
-  const primary = dest.category[0] ?? "cultural"
-  const secondary = dest.category[1]
-  const lib = activityLib[primary] ?? activityLib.cultural
-  const libB = secondary ? (activityLib[secondary] ?? []) : []
-  const combined = [...lib, ...libB]
-  const accCostPerNight = Math.round(Math.max(1200, Math.min(3500, dest.costPerDay * 0.7)))
-
-  return Array.from({ length: days }, (_, d) => {
-    const acts: Activity[] = []
-    if (d === 0) acts.push({ time: "07:30", title: `Travel to ${dest.district}`, note: `From ${from} — ${sameDistrict ? "30 min taxi" : "1.5 hr bus or taxi"}`, icon: "🚌", cost: travelCost })
-    const offset = d * 3
-    acts.push(...combined.slice(offset % lib.length, offset % lib.length + (d === 0 ? 3 : 4)))
-    if (d === days - 1) acts.push({ time: "17:30", title: `Return to ${from}`, note: "Depart early to beat traffic", icon: "🏠", cost: travelCost })
-    if (d < days - 1) acts.push({ time: "20:00", title: "Check-in & dinner", note: `Lodge near site · Rs ${accCostPerNight.toLocaleString()}/night`, icon: "🏨", cost: accCostPerNight + 400 })
-    const totalCost = acts.reduce((s, a) => s + a.cost, 0)
-    const themes = [`Arrival & first impressions`, `${dest.name} — deep dive`, `Hidden corners & local life`, `Farewell morning & departure`]
-    return { day: d + 1, theme: themes[Math.min(d, themes.length - 1)], activities: acts, totalCost }
-  })
-}
-
-// ─── Google Maps URL builder ──────────────────────────────────────────────────
-
-function buildGoogleMapsUrl(
-  from: string,
-  dest: Destination,
-  itinerary: DayPlan[],
-  mode = "driving",
-  dayIndex?: number
-): string {
-  const enc = (s: string) => encodeURIComponent(`${s}, Nepal`)
-  const activities = dayIndex !== undefined
-    ? (itinerary[dayIndex]?.activities ?? [])
-    : itinerary.flatMap(d => d.activities)
-
-  const waypoints = activities
-    .filter(a => !["🚌", "🏠", "🏨", "🍽", "🍜", "🍱", "🌱", "🧺"].includes(a.icon))
-    .slice(0, 7)
-    .map(a => enc(a.title))
-    .join("|")
-
-  const url = `https://www.google.com/maps/dir/?api=1&origin=${enc(from)}&destination=${enc(`${dest.name}, ${dest.district}`)}&travelmode=${mode}${waypoints ? `&waypoints=${waypoints}` : ""}`
-  return url
-}
-
-// ─── Floating Trip Assistant ──────────────────────────────────────────────────
-
-interface AssistantMsg { id: string; role: "bot" | "user"; text: string; chips?: string[] }
-
-const QUICK_CHIPS = [
-  "🗺 Open in Google Maps",
-  "➕ Add 1 more day",
-  "🚶 Switch to walking",
-  "🚌 Switch to transit",
-  "🍜 Food nearby",
-  "🌤 Weather info",
-  "🏨 Where to stay",
-  "✨ What to see",
+const PURPOSE_OPTIONS = [
+  { id: "cultural",   label: "Cultural sites", icon: <Landmark size={13} /> },
+  { id: "wildlife",   label: "Wildlife",       icon: <TreePine  size={13} /> },
+  { id: "history",    label: "History",        icon: <Scroll    size={13} /> },
+  { id: "spiritual",  label: "Spiritual",      icon: <Star      size={13} /> },
+  { id: "nature",     label: "Nature",         icon: <Camera    size={13} /> },
+  { id: "adventure",  label: "Adventure",      icon: <MapPinned size={13} /> },
 ]
 
-function parseAssistantCommand(text: string) {
-  const t = text.toLowerCase()
-  if (/open|navigate|maps|direction|route|go there/.test(t)) return { type: "open_maps" }
-  const addDays = t.match(/add (\d+)|(\d+) more day|extend (\d+)|extra (\d+)/)
-  if (addDays) return { type: "add_days", value: parseInt(addDays[1] || addDays[2] || addDays[3] || addDays[4]) }
-  const setDays = t.match(/(\d+)\s*days?|make it (\d+)|change.*?(\d+)\s*day/)
-  if (setDays && /day/.test(t)) { const n = parseInt(setDays[1] || setDays[2] || setDays[3]); if (n >= 1 && n <= 14) return { type: "set_days", value: n } }
-  const budgetMatch = t.match(/(\d[\d,]{2,})|rs\.?\s*(\d[\d,]+)/)
-  if (budgetMatch && /budget|rupee|rs|spend|cost/.test(t)) { const n = parseInt((budgetMatch[1] || budgetMatch[2]).replace(/,/g, "")); if (n >= 500) return { type: "set_budget", value: n } }
-  if (/walk|foot|pedestrian/.test(t)) return { type: "set_mode", value: "walking" }
-  if (/transit|bus|public transport/.test(t)) return { type: "set_mode", value: "transit" }
-  if (/driv|car|taxi/.test(t)) return { type: "set_mode", value: "driving" }
-  if (/food|eat|restaur|lunch|dinner|meal|cuisine/.test(t)) return { type: "food" }
-  if (/hotel|stay|sleep|accommodation|lodge/.test(t)) return { type: "hotel" }
-  if (/weather|rain|cold|hot|temperature|climate|season/.test(t)) return { type: "weather" }
-  if (/see|visit|attract|sight|explore|do there/.test(t)) return { type: "attractions" }
-  return { type: "general" }
-}
-
-function assistantReply(
-  cmd: ReturnType<typeof parseAssistantCommand>,
-  dest: Destination,
-  days: number,
-  budget: number,
-  travelMode: string
-): string {
-  switch (cmd.type) {
-    case "open_maps": return `Opening Google Maps with your full ${dest.name} itinerary! All stops have been pre-filled. 🗺`
-    case "add_days": return `Adding ${(cmd as any).value} more day${(cmd as any).value > 1 ? "s" : ""} — replanning your itinerary now...`
-    case "set_days": return `Changing trip to ${(cmd as any).value} days — replanning now...`
-    case "set_budget": return `Budget updated to Rs ${(cmd as any).value.toLocaleString()} — finding destinations that fit, then regenerating itinerary...`
-    case "set_mode": {
-      const labels: Record<string, string> = { driving: "🚗 driving", walking: "🚶 walking", transit: "🚌 public transit" }
-      return `Travel mode set to ${labels[(cmd as any).value]}. Your Google Maps link will use this when you open it.`
-    }
-    case "food": return `Great food near ${dest.name}:\n• Dal-bhat sets — Rs 200–400\n• Newari thali restaurants in ${dest.district}\n• Street momos — Rs 80–150\n• Budget Rs 400–700/meal per person`
-    case "hotel": return `Places to stay near ${dest.district}:\n• Budget guesthouses — Rs 800–1,500/night\n• Mid-range hotels — Rs 2,500–4,500/night\n• Heritage / boutique — Rs 6,000+/night\nMost are bookable via the Book & Reserve tab.`
-    case "weather": return `Seasonal weather for ${dest.district}:\n• Spring (Mar–May): 15–25°C ☀️ — ideal\n• Summer (Jun–Aug): 20–28°C 🌧 — monsoon\n• Autumn (Sep–Nov): 12–22°C 🍂 — peak season\n• Winter (Dec–Feb): 5–18°C ❄️ — dry, crisp`
-    case "attractions": return `Must-see at ${dest.name}:\n${dest.highlights.map(h => `• ${h}`).join("\n")}`
-    default: return `I can help update your ${dest.name} trip:\n• "Add 2 more days"\n• "Budget Rs 5000"\n• "Switch to walking"\n• "Open in Google Maps"\n• "What to eat there"\n• "Best time to visit"`
-  }
-}
-
-// ── ML Analysis Panel ─────────────────────────────────────────────────────────
-
-interface AnalysisData {
-  demandScore: number; predictedVisitors: number; sentimentScore: number
-  yoyGrowth: number; peakMonths: string[]; clusterLabel: string
-  topTags: string[]; avgRating: number; reviewCount: number
-}
-
-function MLAnalysisPanel({ destName, t }: { destName: string; t: Theme }) {
-  const [data, setData] = useState<AnalysisData | null>(null)
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState(false)
-
-  useEffect(() => {
-    setLoading(true); setError(false); setData(null)
-    callAI<AnalysisData>("insights", { destination: destName })
-      .then(json => {
-        if (!json) throw new Error("no data")
-        setData(json)
-        setLoading(false)
-      })
-      .catch(() => { setError(true); setLoading(false) })
-  }, [destName])
-
-  const metrics = data ? [
-    { icon: "📈", label: "Demand score",       value: `${Math.round((data.demandScore ?? 0) * 100)}%`, sub: "Seasonal visitor demand index" },
-    { icon: "👥", label: "Predicted visitors", value: (data.predictedVisitors ?? 0).toLocaleString(),  sub: "Next month forecast" },
-    { icon: "⭐", label: "Sentiment score",    value: `${(data.sentimentScore ?? 0).toFixed(1)} / 5`,  sub: `${data.reviewCount ?? 0} reviews analysed` },
-    { icon: "📊", label: "YoY growth",         value: `${data.yoyGrowth > 0 ? "+" : ""}${data.yoyGrowth}%`, sub: "2023 → 2024 visitor change" },
-    { icon: "🗓", label: "Peak months",        value: (data.peakMonths ?? []).slice(0, 3).join(", "), sub: "Best time to visit" },
-    { icon: "🏷", label: "Visitor cluster",    value: data.clusterLabel ?? "—", sub: "Dominant visitor type" },
-  ] : []
-
-  return (
-    <div style={{ border: `0.5px solid ${t.border}`, borderRadius: 12, overflow: "hidden", marginBottom: 8 }}>
-      <div style={{ background: t.subtle, padding: "12px 16px", display: "flex", alignItems: "center", gap: 8 }}>
-        <div style={{ width: 8, height: 8, borderRadius: "50%", background: loading ? t.amber : error ? t.red : t.green }} />
-        <span style={{ fontSize: 12, fontWeight: 600, color: t.textMid }}>ML analysis — {destName}</span>
-        <span style={{ marginLeft: "auto", fontSize: 10, borderRadius: 4, padding: "2px 8px", fontWeight: 600,
-          background: loading ? t.amberLight : error ? t.redLight : t.greenLight,
-          color: loading ? t.amber : error ? t.red : t.green,
-        }}>
-          {loading ? "Loading…" : error ? "Backend offline" : "Live from MongoDB"}
-        </span>
-      </div>
-      <div style={{ padding: "16px", background: t.surface }}>
-        {loading && (
-          <div style={{ display: "flex", alignItems: "center", gap: 8, color: t.textSub, fontSize: 12, padding: "8px 0" }}>
-            <Loader2 size={14} color={t.blue} style={{ animation: "spin 1s linear infinite" }} />
-            Fetching insights from MongoDB…
-          </div>
-        )}
-        {error && (
-          <div style={{ background: t.amberLight, border: `0.5px solid ${t.amber}30`, borderRadius: 8, padding: "10px 14px", fontSize: 12, color: t.amber, lineHeight: 1.6 }}>
-            <strong>AI insights unavailable.</strong> Make sure your Supabase project is connected and the Edge Function is deployed:<br />
-            <code style={{ background: t.surface, padding: "2px 6px", borderRadius: 4, fontSize: 11, marginTop: 4, display: "inline-block" }}>
-              supabase functions deploy gantabya-ai
-            </code><br />
-            Then add <strong>ANTHROPIC_API_KEY</strong> in your Supabase project → Settings → Edge Functions → Secrets.
-          </div>
-        )}
-        {data && (
-          <>
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 10, marginBottom: 14 }}>
-              {metrics.map(item => (
-                <div key={item.label} style={{ background: t.pageBg, border: `0.5px solid ${t.border}`, borderRadius: 8, padding: "11px 13px" }}>
-                  <div style={{ fontSize: 16, marginBottom: 4 }}>{item.icon}</div>
-                  <div style={{ fontSize: 15, fontWeight: 700, color: t.text, lineHeight: 1.2 }}>{item.value}</div>
-                  <div style={{ fontSize: 11, fontWeight: 600, color: t.textMid, marginTop: 3 }}>{item.label}</div>
-                  <div style={{ fontSize: 10, color: t.textFaint }}>{item.sub}</div>
-                </div>
-              ))}
-            </div>
-            {data.topTags && data.topTags.length > 0 && (
-              <div style={{ display: "flex", gap: 5, flexWrap: "wrap" }}>
-                <span style={{ fontSize: 10, color: t.textFaint, marginRight: 2 }}>Visitor tags:</span>
-                {data.topTags.map(tag => (
-                  <span key={tag} style={{ fontSize: 10, fontWeight: 500, color: t.blue, background: t.blueLight, borderRadius: 4, padding: "2px 7px" }}>{tag}</span>
-                ))}
-              </div>
-            )}
-          </>
-        )}
-      </div>
-    </div>
-  )
-}
-
-function FloatingTripAssistant({ from, dest, itinerary, budget, days, travelMode, t, onSetDays, onSetBudget, onSetTravelMode, onReplan, onOpenMaps }: {
-  from: string; dest: Destination; itinerary: DayPlan[]; budget: number; days: number; travelMode: string; t: Theme
-  onSetDays: (n: number) => void; onSetBudget: (n: number) => void
-  onSetTravelMode: (m: string) => void; onReplan: () => void; onOpenMaps: (mode?: string, day?: number) => void
-}) {
-  const [open, setOpen] = useState(false)
-  const [input, setInput] = useState("")
-  const [msgs, setMsgs] = useState<AssistantMsg[]>([{
-    id: "welcome", role: "bot",
-    text: `Your ${days}-day trip to ${dest.name} is ready! I can help you adjust it or open it in Google Maps with all stops pre-filled.`,
-    chips: ["🗺 Open in Google Maps", "➕ Add 1 more day", "🍜 Food nearby"],
-  }])
-  const bottomRef = useRef<HTMLDivElement>(null)
-
-  useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: "smooth" }) }, [msgs])
-
-  async function send(text: string) {
-    if (!text.trim()) return
-    const userMsg: AssistantMsg = { id: Date.now().toString(), role: "user", text }
-    setMsgs(prev => [...prev, userMsg, { id: Date.now() + "-thinking", role: "bot", text: "…", chips: [] }])
-    setInput("")
-
-    // Call assistant: Flask → Supabase Edge Function → local rule-based fallback
-    let replyText = ""
-    let cmd: ReturnType<typeof parseAssistantCommand> = { type: "general" }
-    try {
-      const data = await callAI("assistant", {
-        message: text,
-        context: { destination: dest.name, days, budget, travelMode, from },
-      })
-      replyText = (data as any)?.reply ?? ""
-      const d = data as any
-      cmd = { type: d?.type ?? "general", ...(d?.value != null ? { value: d.value } : {}) } as any
-    } catch {
-      cmd = parseAssistantCommand(text)
-      replyText = assistantReply(cmd, dest, days, budget, travelMode)
-    }
-
-    // Execute side effects based on command type
-    if (cmd.type === "open_maps") {
-      onOpenMaps(travelMode)
-    } else if (cmd.type === "add_days") {
-      onSetDays(days + ((cmd as any).value ?? 1)); setTimeout(onReplan, 150)
-    } else if (cmd.type === "set_days") {
-      onSetDays((cmd as any).value); setTimeout(onReplan, 150)
-    } else if (cmd.type === "set_budget") {
-      onSetBudget((cmd as any).value); setTimeout(onReplan, 150)
-    } else if (cmd.type === "set_mode") {
-      onSetTravelMode((cmd as any).value)
-    }
-
-    const chips = cmd.type === "open_maps"
-      ? ["Full trip", "Day 1 only", "Day 2 only"]
-      : cmd.type === "general"
-      ? ["🗺 Open in Google Maps", "➕ Add 1 more day", "🌤 Weather info"]
-      : ["🗺 Open in Google Maps", "✨ What to see", "🏨 Where to stay"]
-
-    // Replace the thinking bubble with the real response
-    setMsgs(prev => [
-      ...prev.filter(m => !m.id.includes("-thinking")),
-      { id: Date.now().toString() + "-bot", role: "bot", text: replyText, chips },
-    ])
-  }
-
-  return (
-    <div style={{ position: "fixed", bottom: 28, right: 28, zIndex: 200 }}>
-      {/* Collapsed bubble */}
-      {!open && (
-        <button
-          onClick={() => setOpen(true)}
-          style={{
-            width: 52, height: 52, borderRadius: "50%", border: "none",
-            background: t.blue, color: "#fff", cursor: "pointer",
-            display: "flex", alignItems: "center", justifyContent: "center",
-            boxShadow: "0 4px 18px rgba(24,95,165,0.45)",
-            transition: "transform 0.15s",
-            fontSize: 22,
-          }}
-          title="Trip assistant"
-          onMouseEnter={e => (e.currentTarget.style.transform = "scale(1.08)")}
-          onMouseLeave={e => (e.currentTarget.style.transform = "scale(1)")}
-        >
-          🤖
-        </button>
-      )}
-
-      {/* Expanded panel */}
-      {open && (
-        <div style={{
-          width: 320, borderRadius: 14, overflow: "hidden",
-          border: `0.5px solid ${t.border}`,
-          boxShadow: "0 8px 32px rgba(0,0,0,0.18)",
-          display: "flex", flexDirection: "column",
-          maxHeight: 480, background: t.surface,
-        }}>
-          {/* Header */}
-          <div style={{ background: t.blue, padding: "11px 14px", display: "flex", alignItems: "center", gap: 9 }}>
-            <span style={{ fontSize: 18 }}>🤖</span>
-            <div style={{ flex: 1 }}>
-              <div style={{ fontSize: 12, fontWeight: 700, color: "#fff" }}>Trip assistant</div>
-              <div style={{ fontSize: 10, color: "rgba(255,255,255,0.7)" }}>{dest.name} · {days} days</div>
-            </div>
-            <button onClick={() => setOpen(false)} style={{ background: "none", border: "none", color: "rgba(255,255,255,0.8)", cursor: "pointer", fontSize: 16, lineHeight: 1, padding: 2 }}>×</button>
-          </div>
-
-          {/* Messages */}
-          <div style={{ flex: 1, overflowY: "auto", padding: "12px 14px", display: "flex", flexDirection: "column", gap: 10 }}>
-            {msgs.map(msg => (
-              <div key={msg.id}>
-                {msg.role === "user" ? (
-                  <div style={{ display: "flex", justifyContent: "flex-end" }}>
-                    <div style={{ background: t.blue, color: "#fff", borderRadius: "12px 12px 2px 12px", padding: "7px 11px", fontSize: 12, maxWidth: 220, lineHeight: 1.45 }}>
-                      {msg.text}
-                    </div>
-                  </div>
-                ) : (
-                  <div>
-                    <div style={{ background: t.subtle, borderRadius: "2px 12px 12px 12px", padding: "8px 11px", fontSize: 12, color: t.text, lineHeight: 1.55, whiteSpace: "pre-line", maxWidth: 260 }}>
-                      {msg.text}
-                    </div>
-                    {msg.chips && (
-                      <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginTop: 6 }}>
-                        {msg.chips.map(chip => (
-                          <button key={chip} onClick={() => send(chip)} style={{
-                            padding: "4px 9px", borderRadius: 20, border: `0.5px solid ${t.border}`,
-                            background: t.surface, color: t.blue, fontSize: 10, fontWeight: 500,
-                            cursor: "pointer", transition: "all 0.12s",
-                          }}
-                          onMouseEnter={e => { e.currentTarget.style.background = t.blueLight }}
-                          onMouseLeave={e => { e.currentTarget.style.background = t.surface }}
-                          >
-                            {chip}
-                          </button>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                )}
-              </div>
-            ))}
-            <div ref={bottomRef} />
-          </div>
-
-          {/* Quick chips */}
-          <div style={{ padding: "6px 14px 4px", display: "flex", gap: 4, overflowX: "auto", flexShrink: 0 }}>
-            {["🗺 Google Maps", "➕ Day", "💰 Budget", "🚗 Drive", "🚶 Walk"].map(chip => (
-              <button key={chip} onClick={() => send(chip)} style={{
-                padding: "3px 8px", borderRadius: 20, border: `0.5px solid ${t.border}`,
-                background: t.pageBg, color: t.textSub, fontSize: 10, whiteSpace: "nowrap",
-                cursor: "pointer", flexShrink: 0,
-              }}>
-                {chip}
-              </button>
-            ))}
-          </div>
-
-          {/* Input */}
-          <div style={{ padding: "8px 14px 12px", display: "flex", gap: 8, borderTop: `0.5px solid ${t.border}` }}>
-            <input
-              value={input}
-              onChange={e => setInput(e.target.value)}
-              onKeyDown={e => e.key === "Enter" && send(input)}
-              placeholder="Ask me anything about your trip…"
-              style={{
-                flex: 1, height: 34, border: `0.5px solid ${t.border}`, borderRadius: 8,
-                padding: "0 10px", fontSize: 12, color: t.text, background: t.subtle, outline: "none",
-              }}
-            />
-            <button onClick={() => send(input)} style={{
-              width: 34, height: 34, borderRadius: 8, border: "none",
-              background: t.blue, color: "#fff", cursor: "pointer", fontSize: 15,
-              display: "flex", alignItems: "center", justifyContent: "center",
-            }}>
-              <Send size={14} />
-            </button>
-          </div>
-        </div>
-      )}
-    </div>
-  )
+// Timeout wrapper — ensures promises never hang the UI indefinitely
+function withTimeout<T>(p: Promise<T | null>, ms: number): Promise<T | null> {
+  return Promise.race([p, new Promise<null>(res => setTimeout(() => res(null), ms))])
 }
 
 // ─── Smart Planner (unified AI destination finder + itinerary builder) ────────
@@ -2249,31 +2738,141 @@ function LocationPickerMap({ onOrigin, onDestination, t, isDark }: {
   )
 }
 
-// ── Suggested trip cards shown before destination is chosen ──────────────────
+// ── Suggested trip cards with minimum budget & days ──────────────────────────
 const SUGGESTED_TRIPS = [
-  { name: "Pokhara",                emoji: "🌊", tag: "Nature & lakes",       cost: "Rs 3,000–6,000/day", season: "Spring & Autumn", days: "2–4 days",   bg: "#EBF2FB" },
-  { name: "Chitwan National Park",  emoji: "🐘", tag: "Wildlife safari",      cost: "Rs 2,000–4,000/day", season: "Winter & Spring", days: "2–3 days",   bg: "#EAF2E0" },
-  { name: "Annapurna Base Camp",    emoji: "🏔", tag: "Trek & adventure",     cost: "Rs 2,500–5,000/day", season: "Spring & Autumn", days: "7–10 days",  bg: "#EBF2FB" },
-  { name: "Lumbini",                emoji: "☮",  tag: "Spiritual & heritage", cost: "Rs 1,500–3,000/day", season: "All seasons",     days: "1–2 days",   bg: "#FBF3E2" },
-  { name: "Kathmandu Valley",       emoji: "🛕", tag: "Culture & history",    cost: "Rs 2,000–5,000/day", season: "All seasons",     days: "2–4 days",   bg: "#FBEEE8" },
-  { name: "Poon Hill",              emoji: "⛅", tag: "Trek & sunrise",       cost: "Rs 1,500–2,500/day", season: "Spring & Autumn", days: "3–4 days",   bg: "#EAF2E0" },
-  { name: "Rara National Park",     emoji: "🏞", tag: "Remote wilderness",    cost: "Rs 4,000–8,000/day", season: "Spring & Autumn", days: "4–6 days",   bg: "#EBF2FB" },
-  { name: "Mustang Kingdom",        emoji: "🏜", tag: "Desert & culture",     cost: "Rs 5,000–10,000/day",season: "Summer",          days: "5–8 days",   bg: "#FBF3E2" },
+  { name: "Pokhara",               emoji: "🌊", tag: "Nature & lakes",       cost: "Rs 3,000–6,000/day",  season: "Spring & Autumn", days: "2–4 days", bg: "#EBF2FB", minDays: 2, minBudget: 6000  },
+  { name: "Chitwan National Park", emoji: "🐘", tag: "Wildlife safari",      cost: "Rs 2,000–4,000/day",  season: "Winter & Spring", days: "2–3 days", bg: "#EAF2E0", minDays: 2, minBudget: 8000  },
+  { name: "Nagarkot",              emoji: "🌄", tag: "Sunrise viewpoint",     cost: "Rs 1,500–3,000/day",  season: "All seasons",     days: "1–2 days", bg: "#EBF2FB", minDays: 1, minBudget: 3000  },
+  { name: "Lumbini",               emoji: "☮",  tag: "Spiritual & heritage", cost: "Rs 1,500–3,000/day",  season: "All seasons",     days: "1–2 days", bg: "#FBF3E2", minDays: 1, minBudget: 3000  },
+  { name: "Kathmandu Valley",      emoji: "🛕", tag: "Culture & history",    cost: "Rs 2,000–5,000/day",  season: "All seasons",     days: "2–4 days", bg: "#FBEEE8", minDays: 2, minBudget: 5000  },
+  { name: "Bandipur",              emoji: "🏘", tag: "Heritage hill town",   cost: "Rs 2,000–3,500/day",  season: "Spring & Autumn", days: "1–2 days", bg: "#EAF2E0", minDays: 1, minBudget: 4000  },
+  { name: "Janakpur",              emoji: "🏛", tag: "Religious & culture",  cost: "Rs 1,200–2,500/day",  season: "All seasons",     days: "1–2 days", bg: "#EBF2FB", minDays: 1, minBudget: 2500  },
+  { name: "Dharan",                emoji: "🏙", tag: "Mountain gateway",     cost: "Rs 1,500–3,000/day",  season: "All seasons",     days: "1–2 days", bg: "#EAF2E0", minDays: 1, minBudget: 3000  },
 ]
 
+// ── Entry time restrictions for major Nepal tourist sites ─────────────────────
+const ENTRY_RESTRICTIONS: Record<string, { site: string; open: number; close: number; note: string }[]> = {
+  "patan":          [{ site: "Patan Durbar Square",   open: 9,  close: 17, note: "Entry Rs 1,000 foreign · closes 5 PM sharp" }],
+  "bhaktapur":      [{ site: "Bhaktapur Durbar Sq",   open: 7,  close: 17, note: "Entry Rs 1,500 foreign · closes 5 PM sharp" }],
+  "pashupatinath":  [{ site: "Pashupatinath Temple",  open: 4,  close: 21, note: "Foreign visitors: Western Ghats · Rs 1,000" }],
+  "boudhanath":     [{ site: "Boudhanath Stupa",      open: 5,  close: 21, note: "Kora open 5 AM – 9 PM daily" }],
+  "swayambhunath":  [{ site: "Swayambhunath Stupa",   open: 4,  close: 20, note: "Entry till 8 PM · free for locals" }],
+  "changu narayan": [{ site: "Changu Narayan Temple",  open: 6,  close: 17, note: "UNESCO site · closes 5 PM" }],
+  "chitwan":        [{ site: "Chitwan National Park",  open: 6,  close: 18, note: "Safari entry closes 6 PM" }, { site: "Elephant Breeding Center", open: 7, close: 17, note: "Closes 5 PM daily" }],
+  "lumbini":        [{ site: "Maya Devi Temple",       open: 6,  close: 21, note: "Sacred Garden open 6 AM – 9 PM" }],
+  "chandragiri":    [{ site: "Chandragiri Cable Car",  open: 8,  close: 18, note: "Last cable car at 6 PM" }],
+  "nagarkot":       [{ site: "Nagarkot Viewpoint",     open: 0,  close: 24, note: "Best at sunrise 5–7 AM · viewpoint open 24h" }],
+  "annapurna":      [{ site: "ACAP Permit Check",      open: 6,  close: 18, note: "ACAP & TIMS permit required · check post open 6 AM" }],
+  "everest":        [{ site: "Sagarmatha NP Entry",    open: 6,  close: 18, note: "National park entry fee · permit required" }],
+}
+
+function getEntryWarnings(destination: string, etaHour: number) {
+  const lc = destination.toLowerCase()
+  for (const [key, restrictions] of Object.entries(ENTRY_RESTRICTIONS)) {
+    if (lc.includes(key)) {
+      return restrictions.filter(r => etaHour < r.open || etaHour >= r.close)
+    }
+  }
+  return []
+}
+
+// ── Meal suggestions based on journey time ────────────────────────────────────
+function getMealStops(departureTimeStr: string, totalDurMin: number) {
+  if (!departureTimeStr || !totalDurMin) return []
+  const [h, m] = departureTimeStr.split(":").map(Number)
+  const dMin = h * 60 + m
+  const meals: { icon: string; label: string; time: string; items: string; fraction: number }[] = []
+
+  const add = (mealMin: number, icon: string, label: string, items: string) => {
+    if (mealMin > dMin && mealMin < dMin + totalDurMin) {
+      meals.push({ icon, label, time: `${Math.floor(mealMin/60)}:${String(mealMin%60).padStart(2,"0")}`, items, fraction: (mealMin - dMin) / totalDurMin })
+    }
+  }
+
+  // Early breakfast (7 AM) if departing before 7 AM
+  if (dMin < 420) add(420,  "🍳", "Breakfast stop",   "Sel roti, tea, eggs · Rs 80–200")
+  // Brunch (10 AM) if departing 7–10 AM
+  if (dMin >= 420 && dMin < 600) add(600, "☕", "Brunch stop", "Tea, snacks, bread · Rs 100–250")
+  // Lunch (12:30 PM)
+  add(750,  "🍱", "Lunch stop",       "Dal bhat, rice & curry · Rs 150–400")
+  // Afternoon snack (3:30 PM)
+  add(930,  "🫖", "Afternoon break",  "Tea, momo, samosa · Rs 80–200")
+  // Dinner (7:30 PM)
+  add(1170, "🍛", "Dinner stop",      "Dal bhat, thukpa, tandoori · Rs 200–500")
+
+  return meals
+}
+
 // Popular stops lookup — keyed by destination keyword
+// All stops are road-accessible and verified on Google Maps.
+// Remote trek-only locations removed — they caused ZERO_RESULTS in Directions API.
 const POPULAR_STOPS_DB: Record<string, { name: string; emoji: string; note: string }[]> = {
-  pokhara:      [{ name:"Bandipur Village",     emoji:"🏘", note:"Hill town" }, { name:"Gorkha Durbar",       emoji:"🏰", note:"Royal palace" }, { name:"Manakamana Temple",   emoji:"🛕", note:"Cable car temple" }, { name:"Mugling",             emoji:"🌊", note:"Riverside stop" }],
-  chitwan:      [{ name:"Daman Viewpoint",       emoji:"🌄", note:"Himalaya panorama" }, { name:"Hetauda",              emoji:"🏙", note:"Midway city" }, { name:"Bharatpur",            emoji:"🌿", note:"Rapti river" }, { name:"Narayanghat",          emoji:"🌊", note:"Gandaki confluence" }],
-  lumbini:      [{ name:"Palpa Tansen",           emoji:"⛩",  note:"Heritage town" }, { name:"Devdaha",              emoji:"☮",  note:"Sacred site" }, { name:"Butwal",               emoji:"🏙", note:"Gateway city" }, { name:"Kapilvastu",           emoji:"🏛",  note:"Buddha's kingdom" }],
-  annapurna:    [{ name:"Pokhara Lakeside",       emoji:"🌊", note:"Start of treks" }, { name:"Nayapul",              emoji:"🌿", note:"Trailhead" }, { name:"Ghorepani",            emoji:"⛺", note:"Rhododendron forest" }, { name:"Poon Hill",            emoji:"⛅", note:"Sunrise viewpoint" }],
-  everest:      [{ name:"Lukla Airport",          emoji:"✈",  note:"Trek gateway" }, { name:"Namche Bazaar",        emoji:"🏔", note:"Sherpa capital" }, { name:"Tengboche Monastery",  emoji:"🏯", note:"Scenic monastery" }, { name:"Dingboche",            emoji:"⛺", note:"High altitude stop" }],
-  mustang:      [{ name:"Jomsom",                 emoji:"🏔", note:"Windy valley" }, { name:"Kagbeni",              emoji:"🏯", note:"Medieval village" }, { name:"Muktinath Temple",     emoji:"🛕", note:"Sacred pilgrimage" }, { name:"Lo Manthang",          emoji:"🏛",  note:"Ancient walled city" }],
-  rara:         [{ name:"Jumla",                  emoji:"🍎", note:"Apple orchard town" }, { name:"Sinja Valley",         emoji:"🏛",  note:"Ancient ruins" }, { name:"Talcha Airport",       emoji:"✈",  note:"Remote airstrip" }],
-  kathmandu:    [{ name:"Boudhanath Stupa",       emoji:"🏛",  note:"Buddhist hub" }, { name:"Patan Durbar Square",  emoji:"🏰", note:"Newari palace" }, { name:"Swayambhunath",        emoji:"🐵", note:"Monkey temple" }, { name:"Bhaktapur",            emoji:"🏯", note:"Medieval city" }],
-  bhaktapur:    [{ name:"Changu Narayan Temple",  emoji:"🏯", note:"UNESCO site" }, { name:"Boudhanath Stupa",     emoji:"🏛",  note:"Buddhist stupa" }, { name:"Nagarkot",             emoji:"🌄", note:"Sunrise viewpoint" }],
-  ilam:         [{ name:"Kanyam Tea Garden",      emoji:"🍃", note:"Tea estate" }, { name:"Sandakpur",            emoji:"⛰",  note:"Mountain views" }, { name:"Mai Pokhari",          emoji:"🌊", note:"Sacred lake" }],
-  default:      [{ name:"Boudhanath Stupa",       emoji:"🏛",  note:"Buddhist heritage" }, { name:"Patan Durbar Square",  emoji:"🏰", note:"Newari art" }, { name:"Changu Narayan",       emoji:"🏯", note:"UNESCO temple" }, { name:"Namobuddha",           emoji:"🌄", note:"Monastery" }],
+  pokhara:   [
+    { name:"Manakamana Temple, Gorkha, Nepal",      emoji:"🛕", note:"Cable car temple"   },
+    { name:"Bandipur, Tanahun, Nepal",              emoji:"🏘", note:"Hill heritage town"  },
+    { name:"Mugling, Chitwan, Nepal",               emoji:"🌊", note:"Riverside stop"      },
+    { name:"Gorkha, Gorkha, Nepal",                 emoji:"🏰", note:"Royal palace town"   },
+  ],
+  chitwan:   [
+    { name:"Hetauda, Makwanpur, Nepal",             emoji:"🏙", note:"Midway city"          },
+    { name:"Narayanghat, Chitwan, Nepal",           emoji:"🌊", note:"Gandaki confluence"   },
+    { name:"Daman, Makwanpur, Nepal",               emoji:"🌄", note:"Himalaya viewpoint"   },
+    { name:"Bharatpur, Chitwan, Nepal",             emoji:"🌿", note:"Rapti riverside"      },
+  ],
+  lumbini:   [
+    { name:"Butwal, Rupandehi, Nepal",              emoji:"🏙", note:"Gateway city"         },
+    { name:"Tansen, Palpa, Nepal",                  emoji:"⛩",  note:"Heritage hill town"   },
+    { name:"Bhairahawa, Rupandehi, Nepal",          emoji:"✈",  note:"Airport & border"     },
+    { name:"Sunauli, Rupandehi, Nepal",             emoji:"🌐", note:"India border town"    },
+  ],
+  annapurna: [
+    { name:"Nayapul, Kaski, Nepal",                 emoji:"🌿", note:"Trek trailhead"       },
+    { name:"Beni, Myagdi, Nepal",                   emoji:"🌊", note:"River junction"       },
+    { name:"Kushma, Parbat, Nepal",                 emoji:"🌉", note:"Bungee bridge town"   },
+    { name:"Baglung, Baglung, Nepal",               emoji:"🏙", note:"District hub"         },
+  ],
+  everest:   [
+    { name:"Biratnagar, Morang, Nepal",             emoji:"🏭", note:"Second largest city"  },
+    { name:"Dharan, Sunsari, Nepal",                emoji:"🏙", note:"Mountain gateway"     },
+    { name:"Hile, Dhankuta, Nepal",                 emoji:"🌄", note:"Scenic mountain town" },
+    { name:"Ilam, Ilam, Nepal",                     emoji:"🍃", note:"Tea garden town"      },
+  ],
+  mustang:   [
+    { name:"Beni, Myagdi, Nepal",                   emoji:"🌊", note:"Mustang road gateway" },
+    { name:"Baglung, Baglung, Nepal",               emoji:"🏙", note:"District hub"         },
+    { name:"Kushma, Parbat, Nepal",                 emoji:"🌉", note:"Swing capital"        },
+    { name:"Dhorpatan, Baglung, Nepal",             emoji:"🏕", note:"Hunting reserve"      },
+  ],
+  rara:      [
+    { name:"Nepalgunj, Banke, Nepal",               emoji:"✈",  note:"Flight gateway"       },
+    { name:"Surkhet, Surkhet, Nepal",               emoji:"🏙", note:"Karnali capital"      },
+    { name:"Birendranagar, Surkhet, Nepal",         emoji:"🌿", note:"Provincial hub"       },
+    { name:"Dailekh, Dailekh, Nepal",               emoji:"🏔", note:"Mountain district"    },
+  ],
+  kathmandu: [
+    { name:"Boudhanath, Kathmandu, Nepal",          emoji:"🏛", note:"Buddhist hub"         },
+    { name:"Patan Durbar Square, Lalitpur, Nepal",  emoji:"🏰", note:"Newari palace"        },
+    { name:"Swayambhunath, Kathmandu, Nepal",       emoji:"🐵", note:"Monkey temple"        },
+    { name:"Bhaktapur Durbar Square, Nepal",        emoji:"🏯", note:"Medieval walled city" },
+  ],
+  bhaktapur: [
+    { name:"Changu Narayan, Bhaktapur, Nepal",      emoji:"🏯", note:"UNESCO temple"        },
+    { name:"Nagarkot, Bhaktapur, Nepal",            emoji:"🌄", note:"Sunrise viewpoint"    },
+    { name:"Dhulikhel, Kavrepalanchok, Nepal",      emoji:"🏔", note:"Himalaya panorama"    },
+    { name:"Namo Buddha, Kavrepalanchok, Nepal",    emoji:"🌄", note:"Buddhist monastery"   },
+  ],
+  ilam:      [
+    { name:"Kanyam, Ilam, Nepal",                   emoji:"🍃", note:"Tea estate"           },
+    { name:"Birtamod, Jhapa, Nepal",                emoji:"🌾", note:"Jhapa district"       },
+    { name:"Phidim, Panchthar, Nepal",              emoji:"🏙", note:"District town"        },
+    { name:"Damak, Jhapa, Nepal",                   emoji:"🏙", note:"Eastern hub"          },
+  ],
+  default:   [
+    { name:"Boudhanath Stupa, Kathmandu, Nepal",    emoji:"🏛", note:"Buddhist heritage"    },
+    { name:"Patan Durbar Square, Lalitpur, Nepal",  emoji:"🏰", note:"Newari art & culture" },
+    { name:"Changu Narayan, Bhaktapur, Nepal",      emoji:"🏯", note:"UNESCO temple"        },
+    { name:"Dhulikhel, Kavrepalanchok, Nepal",      emoji:"🏔", note:"Himalaya views"       },
+  ],
 }
 
 function getPopularStops(dest: string): { name: string; emoji: string; note: string }[] {
@@ -2429,8 +3028,8 @@ function SmartPlannerPage() {
   const [debouncedDest,  setDebouncedDest]  = useState("")   // throttled version for map
   const [searchQuery,    setSearchQuery]    = useState("")   // free-text in Phase A (does NOT switch phase)
   const [from,           setFrom]           = useState("")   // starting point — empty by default
-  const [budget,         setBudget]         = useState(8000)
-  const [days,           setDays]           = useState(3)
+  const [budget,         setBudget]         = useState(0)
+  const [days,           setDays]           = useState(0)
   const [purposes,       setPurposes]       = useState<string[]>([])
   const [addedStops,     setAddedStops]     = useState<string[]>([])  // stops along the route
   const [departureDate,  setDepartureDate]  = useState("")            // YYYY-MM-DD
@@ -2448,6 +3047,17 @@ function SmartPlannerPage() {
   const [travelMode, setTravelMode] = useState<"driving" | "walking" | "transit">("driving")
   const [mapView, setMapView] = useState(false)
   const itineraryRef = useRef<HTMLDivElement>(null)
+
+  // Safety valve — if stuck in a loading phase for > 15 s, auto-reset to avoid frozen UI
+  useEffect(() => {
+    if (phase !== "finding" && phase !== "planning") return
+    const id = setTimeout(() => {
+      console.warn("[SmartPlanner] phase stuck, resetting to input")
+      setPhase("input")
+      setRecommendations([])
+    }, 15000)
+    return () => clearTimeout(id)
+  }, [phase])
 
   // Debounce destination for map — only fires after 900ms of no typing, min 5 chars
   useEffect(() => {
@@ -2471,9 +3081,10 @@ function SmartPlannerPage() {
     await new Promise(r => setTimeout(r, 600))
     let plan: DayPlan[]
     try {
-      const data = await callAI<{ itinerary: DayPlan[] }>("itinerary", {
-        destination: selected.name, days, budget, from, purposes,
-      })
+      const data = await withTimeout(
+        callAI<{ itinerary: DayPlan[] }>("itinerary", { destination: selected.name, days, budget, from, purposes }),
+        8000   // 8 s — fall back to mock if edge fn doesn't respond
+      )
       plan = data?.itinerary ?? []
       if (plan.length === 0) throw new Error("empty")
     } catch {
@@ -2503,7 +3114,10 @@ function SmartPlannerPage() {
     } catch {
       try {
         // 2. Supabase Edge Function (Claude AI)
-        const data = await callAI("recommend", { budget, purposes, days, from: from || "Kathmandu", destination })
+        const data = await withTimeout(
+          callAI("recommend", { budget, purposes, days, from: from || "Kathmandu", destination }),
+          7000   // 7 s timeout
+        )
         destinations = (data as any)?.destinations ?? []
         if (destinations.length === 0) throw new Error("empty")
       } catch {
@@ -2536,7 +3150,10 @@ function SmartPlannerPage() {
     } catch {
       try {
         // 2. Supabase Edge Function (Claude AI)
-        const data = await callAI("itinerary", { destination: dest.name, days, budget, from: from || "Kathmandu", purposes, stops: addedStops })
+        const data = await withTimeout(
+          callAI("itinerary", { destination: dest.name, days, budget, from: from || "Kathmandu", purposes, stops: addedStops }),
+          8000   // 8 s timeout
+        )
         plan = (data as any)?.itinerary ?? []
         if (plan.length === 0) throw new Error("empty")
       } catch {
@@ -2584,7 +3201,7 @@ function SmartPlannerPage() {
   const openMapsUrl = phase === "itinerary" && selected
     ? buildGoogleMapsUrl(from || "Kathmandu", selected, itinerary, travelMode)
     : `https://www.google.com/maps/dir/?api=1` +
-      `&origin=${encodeURIComponent((from || "Kathmandu") + ", Nepal")}` +
+      `&origin=${encodeURIComponent((() => { const o=(from||"Kathmandu").trim(); return /^-?\d+\.?\d*,\s*-?\d+\.?\d*$/.test(o)?o:`${o}, Nepal` })())}` +
       `&destination=${encodeURIComponent(mapDest || "Nepal")}` +
       (addedStops.length ? `&waypoints=${addedStops.map(s => encodeURIComponent(s + ", Nepal")).join("|")}` : "") +
       `&travelmode=${travelMode}`
@@ -2651,7 +3268,11 @@ function SmartPlannerPage() {
               {SUGGESTED_TRIPS.map(trip => (
                 <button
                   key={trip.name}
-                  onClick={() => setDestination(trip.name)}
+                  onClick={() => {
+                    setDestination(trip.name)
+                    if (budget === 0) setBudget(trip.minBudget)
+                    if (days === 0) setDays(trip.minDays)
+                  }}
                   style={{
                     display: "flex", flexDirection: "column", alignItems: "flex-start",
                     padding: "10px 12px", borderRadius: 10, border: `0.5px solid ${t.border}`,
@@ -2743,23 +3364,15 @@ function SmartPlannerPage() {
               />
             )}
 
-            {/* ── Mini route preview map (debounced: fires 900ms after typing stops, min 5 chars) ── */}
-            {!showMapPicker && debouncedDest.length >= 5 && (
-              <div style={{ borderRadius: 10, overflow: "hidden", border: `0.5px solid ${t.border}`, position: "relative" }}>
-                <div style={{ height: 160 }}>
-                  <RouteMap
-                    origin={from.trim() || "Kathmandu, Nepal"}
-                    waypoints={addedStops.filter(Boolean)}
-                    destination={debouncedDest + ", Nepal"}
-                    travelMode="driving"
-                    isDark={isDark}
-                    t={t}
-                  />
-                </div>
-                {/* Map label */}
-                <div style={{ position: "absolute", top: 6, left: 6, background: "rgba(0,0,0,0.55)", borderRadius: 5, padding: "2px 7px", fontSize: 9, color: "#fff", backdropFilter: "blur(2px)" }}>
-                  {from.trim() || "Kathmandu"} → {debouncedDest}
-                </div>
+            {/* Mini map removed — route is shown in the always-visible right-panel map.
+                Having two simultaneous Google Maps instances caused production freezes. */}
+            {debouncedDest.length >= 5 && (
+              <div style={{ padding: "6px 10px", borderRadius: 8, background: t.blueLight, border: `0.5px solid ${t.blue}20`, display: "flex", alignItems: "center", gap: 6 }}>
+                <div style={{ width: 6, height: 6, borderRadius: "50%", background: t.blue, flexShrink: 0 }} />
+                <span style={{ fontSize: 11, color: t.blue }}>
+                  Route preview: <strong>{from.trim() || "Your location"}</strong> → <strong>{debouncedDest}</strong>
+                </span>
+                <span style={{ fontSize: 10, color: t.textFaint, marginLeft: "auto" }}>See map →</span>
               </div>
             )}
 
@@ -2946,6 +3559,63 @@ function SmartPlannerPage() {
               )
             })()}
 
+            {/* ── Entry time warnings + meal timeline ── */}
+            {destination && departureDate && departureTime && routeInfo.duration !== "—" && (() => {
+              const durMatch = routeInfo.duration.match(/(\d+)h\s*(\d+)?m?/)
+              const totalDurMin = durMatch ? parseInt(durMatch[1] || "0") * 60 + parseInt(durMatch[2] || "0") : 0
+              if (!totalDurMin) return null
+
+              const destEta = new Date(new Date(departureDate + "T" + departureTime).getTime() + totalDurMin * 60 * 1000)
+              const entryWarnings = getEntryWarnings(destination, destEta.getHours())
+              const meals = getMealStops(departureTime, totalDurMin)
+              if (!entryWarnings.length && !meals.length) return null
+
+              return (
+                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+
+                  {/* Entry time warnings */}
+                  {entryWarnings.map((w, i) => (
+                    <div key={i} style={{ padding: "9px 12px", borderRadius: 9, background: "#FBEEE8", border: `0.5px solid ${t.orange}30`, display: "flex", gap: 8, alignItems: "flex-start" }}>
+                      <span style={{ fontSize: 16, flexShrink: 0 }}>⚠️</span>
+                      <div>
+                        <div style={{ fontSize: 11, fontWeight: 700, color: t.orange }}>Entry time warning — {w.site}</div>
+                        <div style={{ fontSize: 10, color: t.orange, opacity: 0.8, marginTop: 2 }}>
+                          Open {w.open}:00 – {w.close}:00 · You arrive at {destEta.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" })} which is {destEta.getHours() >= w.close ? "after closing" : "before opening"} time.
+                        </div>
+                        <div style={{ fontSize: 10, color: t.textSub, marginTop: 2 }}>{w.note}</div>
+                      </div>
+                    </div>
+                  ))}
+
+                  {/* Meal timeline */}
+                  {meals.length > 0 && (
+                    <div style={{ padding: "10px 12px", borderRadius: 9, background: t.greenLight, border: `0.5px solid ${t.green}30` }}>
+                      <div style={{ fontSize: 10, fontWeight: 700, color: t.green, textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 8 }}>
+                        🍴 Meal stops on this journey
+                      </div>
+                      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                        {meals.map((meal, i) => (
+                          <div key={i} style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                            <span style={{ fontSize: 16, flexShrink: 0 }}>{meal.icon}</span>
+                            <div style={{ flex: 1 }}>
+                              <div style={{ fontSize: 11, fontWeight: 600, color: t.green }}>{meal.label} <span style={{ fontWeight: 400, color: t.textSub }}>· {meal.time}</span></div>
+                              <div style={{ fontSize: 10, color: t.textSub }}>{meal.items}</div>
+                            </div>
+                            <button
+                              onClick={() => window.open(`https://www.google.com/maps/search/restaurant+food+${encodeURIComponent("Nepal en route " + destination)}`, "_blank")}
+                              style={{ flexShrink: 0, padding: "3px 8px", borderRadius: 5, border: `0.5px solid ${t.green}40`, background: "white", color: t.green, fontSize: 9, fontWeight: 600, cursor: "pointer" }}
+                            >
+                              Find
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )
+            })()}
+
             {/* ── Destination hotel suggestion (when ETA at final destination is late) ── */}
             {destination && departureDate && departureTime && routeInfo.duration !== "—" && (() => {
               const durMatch = routeInfo.duration.match(/(\d+)h\s*(\d+)?m?/)
@@ -2991,27 +3661,27 @@ function SmartPlannerPage() {
             {/* Budget + Days */}
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
               <div>
-                <label style={{ fontSize: 11, fontWeight: 600, color: t.textSub, display: "block", marginBottom: 5, textTransform: "uppercase", letterSpacing: "0.05em" }}>Budget (Rs)</label>
+                <label style={{ fontSize: 11, fontWeight: 600, color: t.textSub, display: "block", marginBottom: 5, textTransform: "uppercase", letterSpacing: "0.05em" }}>Total budget (Rs)</label>
                 <div style={{ position: "relative" }}>
                   <Wallet size={13} style={{ position: "absolute", left: 9, top: "50%", transform: "translateY(-50%)", color: t.textFaint }} />
-                  <input type="number" value={budget} min={500} step={500} onChange={(e) => setBudget(Number(e.target.value))} style={inS} />
+                  <input type="number" value={budget || ""} min={0} step={500} placeholder="e.g. 6000" onChange={(e) => setBudget(Number(e.target.value))} style={inS} />
                 </div>
                 <div style={{ display: "flex", gap: 3, marginTop: 4 }}>
-                  {[3000, 5000, 10000].map((v) => (
+                  {[3000, 6000, 10000, 20000].map((v) => (
                     <button key={v} onClick={() => setBudget(v)} style={{ padding: "2px 6px", borderRadius: 4, border: `0.5px solid ${budget === v ? t.blue : t.border}`, background: budget === v ? t.blueLight : "transparent", color: budget === v ? t.blue : t.textFaint, fontSize: 9, cursor: "pointer" }}>
-                      Rs {v / 1000}k
+                      Rs {v >= 1000 ? v / 1000 + "k" : v}
                     </button>
                   ))}
                 </div>
               </div>
               <div>
-                <label style={{ fontSize: 11, fontWeight: 600, color: t.textSub, display: "block", marginBottom: 5, textTransform: "uppercase", letterSpacing: "0.05em" }}>Days</label>
+                <label style={{ fontSize: 11, fontWeight: 600, color: t.textSub, display: "block", marginBottom: 5, textTransform: "uppercase", letterSpacing: "0.05em" }}>Days of travel</label>
                 <div style={{ position: "relative" }}>
                   <Clock size={13} style={{ position: "absolute", left: 9, top: "50%", transform: "translateY(-50%)", color: t.textFaint }} />
-                  <input type="number" value={days} min={1} max={14} onChange={(e) => setDays(Math.max(1, Number(e.target.value)))} style={inS} />
+                  <input type="number" value={days || ""} min={0} max={30} placeholder="e.g. 2" onChange={(e) => setDays(Math.max(0, Number(e.target.value)))} style={inS} />
                 </div>
                 <div style={{ display: "flex", gap: 3, marginTop: 4 }}>
-                  {[1, 2, 3, 5].map((v) => (
+                  {[1, 2, 3, 5, 7].map((v) => (
                     <button key={v} onClick={() => setDays(v)} style={{ padding: "2px 6px", borderRadius: 4, border: `0.5px solid ${days === v ? t.blue : t.border}`, background: days === v ? t.blueLight : "transparent", color: days === v ? t.blue : t.textFaint, fontSize: 9, cursor: "pointer" }}>
                       {v}d
                     </button>
@@ -3113,9 +3783,9 @@ function SmartPlannerPage() {
                         <div style={{ fontSize: 11, fontWeight: 600, color: t.blue }}>Rs {dest.costPerDay.toLocaleString()}/day</div>
                       </div>
                     </div>
-                    <ScoreBar score={dest.score} color={isActive ? t.blue : t.blueMid} />
+                    <ScoreBar score={dest.score ?? 0.5} color={isActive ? t.blue : t.blueMid} />
                     <div style={{ display: "flex", gap: 4, marginTop: 6, flexWrap: "wrap" }}>
-                      {dest.category.map((c) => (
+                      {(dest.category ?? dest.categories ?? []).map((c: string) => (
                         <span key={c} style={{ fontSize: 9, color: t.textSub, background: t.surface, border: `0.5px solid ${t.border}`, borderRadius: 4, padding: "1px 5px", textTransform: "capitalize" }}>{c}</span>
                       ))}
                     </div>
@@ -3239,12 +3909,18 @@ function SmartPlannerPage() {
 
         {/* ── Full-height Google Map (always visible) ── */}
         <div style={{ position: "absolute", inset: 0 }}>
+          <MapBoundary>
           {phase === "itinerary" && selected ? (
             <ItineraryMap dest={selected} itinerary={itinerary} activeDay={activeDay} from={from || "Kathmandu"} isDark={isDark} t={t} />
           ) : mapDest ? (
             <RouteMap
-              origin={(from || "Kathmandu") + (from.toLowerCase().includes("nepal") ? "" : ", Nepal")}
+              origin={(() => {
+                const o = (from || "Kathmandu").trim()
+                if (/^-?\d+\.?\d*,\s*-?\d+\.?\d*$/.test(o)) return o
+                return o.toLowerCase().includes("nepal") ? o : `${o}, Nepal`
+              })()}
               waypoints={addedStops.filter(Boolean)}
+              pinLocations={addedStops.filter(Boolean)}
               destination={mapDest}
               travelMode={travelMode}
               isDark={isDark} t={t}
@@ -3259,6 +3935,7 @@ function SmartPlannerPage() {
               </div>
             </div>
           )}
+          </MapBoundary>
         </div>
 
         {/* ── Top overlay: route label + loading + day tabs + Open in Google Maps ── */}
@@ -3411,7 +4088,6 @@ const navItems: { id: Page; label: string; icon: React.ElementType }[] = [
   { id: "pathfinder", label: "Pathfinder", icon: Compass },
   { id: "smart-planner", label: "Smart planner", icon: Bot },
   { id: "nearby", label: "Nearby", icon: MapPin },
-  { id: "live-tracking", label: "Live tracking", icon: Navigation },
   { id: "book", label: "Book & reserve", icon: BookOpen },
 ]
 
@@ -3423,7 +4099,7 @@ function Sidebar({
   collapsed: boolean
   setCollapsed: (v: boolean) => void
 }) {
-  const { t, isDark, toggleDark } = useT()
+  const { t, isDark, toggleDark, navigateTo } = useT()
   const W = collapsed ? 60 : 200
 
   return (
@@ -3479,7 +4155,7 @@ function Sidebar({
             <div key={item.id} style={{ position: "relative" }}>
               <button
                 title={collapsed ? item.label : undefined}
-                onClick={() => setActivePage(item.id)}
+                onClick={() => navigateTo(item.id)}
                 style={{
                   width: "100%", display: "flex", alignItems: "center",
                   gap: collapsed ? 0 : 9,
@@ -3582,14 +4258,23 @@ function Sidebar({
 // ─── App ──────────────────────────────────────────────────────────────────────
 
 export default function App() {
-  const [activePage, setActivePage] = useState<Page>("dashboard")
-  const [collapsed, setCollapsed] = useState(false)
-  const [isDark, setIsDark] = useState(false)
+  const [activePage,   setActivePage]  = useState<Page>("dashboard")
+  const [mountedPages, setMountedPages] = useState<Set<Page>>(new Set<Page>(["dashboard"]))
+  const [collapsed,    setCollapsed]   = useState(false)
+  const [isDark,      setIsDark]      = useState(false)
+  const [pendingNav,  setPendingNav]  = useState<NavRequest | null>(null)
 
   const ctxValue: Ctx = {
     t: isDark ? dark : light,
     isDark,
     toggleDark: () => setIsDark((d) => !d),
+    pendingNav,
+    clearNav:   () => setPendingNav(null),
+    navigateTo: (page, nav) => {
+      if (nav) setPendingNav(nav)
+      setActivePage(page)
+      setMountedPages(prev => new Set([...prev, page]))  // keep-alive: mount once, never unmount
+    },
   }
 
   const { t } = ctxValue
@@ -3603,14 +4288,33 @@ export default function App() {
           collapsed={collapsed}
           setCollapsed={setCollapsed}
         />
-        <main style={{ flex: 1, overflowY: "auto", overflowX: "hidden" }}>
-          {activePage === "dashboard" && <DashboardPage />}
-          {activePage === "pathfinder" && <PathfinderPage />}
-          {activePage === "trip-planner" && <TripPlannerPage />}
-          {activePage === "nearby" && <NearbyPage />}
-          {activePage === "live-tracking" && <LiveTrackingPage />}
-          {activePage === "book" && <BookingPage />}
-          {activePage === "smart-planner" && <SmartPlannerPage />}
+        <main style={{
+          flex: 1, overflowY: "auto", overflowX: "hidden",
+          // Centre content when sidebar is collapsed so it doesn't hug the left edge
+          display: "flex", flexDirection: "column", alignItems: "center",
+        }}>
+          {/* Keep-alive: pages mount once and stay mounted — state is preserved across navigation.
+              display:none hides the inactive page without unmounting it. */}
+          {(["dashboard", "pathfinder", "smart-planner", "nearby", "book"] as Page[]).map(page => (
+            mountedPages.has(page) ? (
+              <div
+                key={page}
+                style={{
+                  width: "100%", flex: activePage === page ? 1 : undefined,
+                  display: activePage === page ? "flex" : "none",
+                  flexDirection: "column",
+                  // Full-height pages need height:100% to fill the main scroll area
+                  height: (["smart-planner", "nearby", "book"] as Page[]).includes(page) && activePage === page ? "100%" : undefined,
+                }}
+              >
+                {page === "dashboard"     && <DashboardPage />}
+                {page === "pathfinder"    && <PathfinderPage />}
+                {page === "smart-planner" && <SmartPlannerPage />}
+                {page === "nearby"        && <NearbyPage />}
+                {page === "book"          && <BookingPage />}
+              </div>
+            ) : null
+          ))}
         </main>
 
         <style>{`
