@@ -83,16 +83,27 @@ const dark: Theme = {
 
 interface NavRequest { origin: string; dest: string }
 interface Ctx {
-  t: Theme; isDark: boolean; toggleDark: () => void
+  t: Theme; isDark: boolean; isMobile: boolean; toggleDark: () => void
   navigateTo: (page: Page, nav?: NavRequest) => void
   pendingNav: NavRequest | null
   clearNav: () => void
 }
 const ThemeCtx = createContext<Ctx>({
-  t: light, isDark: false, toggleDark: () => {},
+  t: light, isDark: false, isMobile: false, toggleDark: () => {},
   navigateTo: () => {}, pendingNav: null, clearNav: () => {},
 })
 const useT = () => useContext(ThemeCtx)
+
+// Detect mobile viewport with resize listener
+function useIsMobile(breakpoint = 768): boolean {
+  const [mobile, setMobile] = useState(() => typeof window !== "undefined" && window.innerWidth < breakpoint)
+  useEffect(() => {
+    const handler = () => setMobile(window.innerWidth < breakpoint)
+    window.addEventListener("resize", handler)
+    return () => window.removeEventListener("resize", handler)
+  }, [breakpoint])
+  return mobile
+}
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -721,7 +732,7 @@ function NepalMap({ selectedId, onSelect, t }: {
 // ─── Pages ────────────────────────────────────────────────────────────────────
 
 function DashboardPage() {
-  const { t } = useT()
+  const { t, isMobile } = useT()
   const [season, setSeason] = useState<Season>("Spring")
   const [provinceId, setProvinceId] = useState("bagmati")
   const [showAllPlaces, setShowAllPlaces] = useState(false)
@@ -735,7 +746,7 @@ function DashboardPage() {
   const handleProvinceChange = (id: string) => { setProvinceId(id); setShowAllPlaces(false) }
 
   return (
-    <div style={{ padding: "0 0 28px", maxWidth: 1140, width: "100%", margin: "0 auto" }}>
+    <div style={{ padding: "0 0 28px", maxWidth: isMobile ? "100%" : 1140, width: "100%", margin: "0 auto" }}>
 
       {/* ── Hero banner ── */}
       <div style={{ position: "relative", overflow: "hidden", marginBottom: 28, minHeight: 220 }}>
@@ -761,49 +772,48 @@ function DashboardPage() {
           </div>
 
           {/* Title */}
-          <div style={{ display: "flex", alignItems: "baseline", gap: 14, marginBottom: 8 }}>
+          <div style={{ display: "flex", alignItems: "baseline", gap: isMobile ? 8 : 14, marginBottom: 6, flexWrap: "wrap" }}>
             <h1 style={{
-              fontSize: 52, fontWeight: 800, color: "#ffffff", margin: 0, lineHeight: 1,
-              letterSpacing: "-0.03em",
-              textShadow: "0 2px 24px rgba(0,0,0,0.5)",
+              fontSize: isMobile ? 34 : 52, fontWeight: 800, color: "#ffffff", margin: 0, lineHeight: 1,
+              letterSpacing: "-0.03em", textShadow: "0 2px 24px rgba(0,0,0,0.5)",
             }}>
               Gantabya
             </h1>
-            <span style={{ fontSize: 20, fontWeight: 300, color: "rgba(255,255,255,0.5)", letterSpacing: "0.04em" }}>
+            <span style={{ fontSize: isMobile ? 14 : 20, fontWeight: 300, color: "rgba(255,255,255,0.5)", letterSpacing: "0.04em" }}>
               गन्तव्य
             </span>
           </div>
 
           {/* Subtitle */}
-          <p style={{ fontSize: 14, color: "rgba(255,255,255,0.72)", margin: "0 0 22px", fontWeight: 400, maxWidth: 440, lineHeight: 1.6, textShadow: "0 1px 8px rgba(0,0,0,0.4)" }}>
-            Official tourism intelligence platform for Nepal's seven provinces — discover, plan, and navigate your journey.
+          <p style={{ fontSize: isMobile ? 12 : 14, color: "rgba(255,255,255,0.72)", margin: "0 0 16px", fontWeight: 400, maxWidth: 440, lineHeight: 1.5, textShadow: "0 1px 8px rgba(0,0,0,0.4)" }}>
+            Official tourism platform for Nepal's seven provinces — discover, plan, and navigate.
           </p>
 
           {/* Quick stats */}
-          <div style={{ display: "flex", gap: 28 }}>
+          <div style={{ display: "flex", gap: isMobile ? 16 : 28, flexWrap: "wrap" }}>
             {[
-              { value: "7", label: "Provinces" },
+              { value: "7",    label: "Provinces" },
               { value: "124+", label: "Destinations" },
-              { value: "4.8M", label: "Annual visitors" },
-              { value: "7", label: "UNESCO sites" },
+              { value: "4.8M", label: "Visitors" },
+              { value: "7",    label: "UNESCO" },
             ].map((item, i) => (
-              <div key={item.label} style={{ display: "flex", flexDirection: "column", gap: 2, paddingRight: 28, borderRight: i < 3 ? "1px solid rgba(255,255,255,0.15)" : "none" }}>
-                <div style={{ fontSize: 22, fontWeight: 800, color: "#ffffff", lineHeight: 1, textShadow: "0 1px 8px rgba(0,0,0,0.4)" }}>{item.value}</div>
-                <div style={{ fontSize: 10, color: "rgba(255,255,255,0.5)", textTransform: "uppercase", letterSpacing: "0.08em" }}>{item.label}</div>
+              <div key={item.label} style={{ display: "flex", flexDirection: "column", gap: 2, paddingRight: isMobile ? 16 : 28, borderRight: i < 3 ? "1px solid rgba(255,255,255,0.15)" : "none" }}>
+                <div style={{ fontSize: isMobile ? 16 : 22, fontWeight: 800, color: "#ffffff", lineHeight: 1 }}>{item.value}</div>
+                <div style={{ fontSize: 9, color: "rgba(255,255,255,0.5)", textTransform: "uppercase", letterSpacing: "0.08em" }}>{item.label}</div>
               </div>
             ))}
           </div>
         </div>
       </div>
 
-      <div style={{ padding: "0 32px" }}>
+      <div style={{ padding: isMobile ? "0 12px" : "0 32px" }}>
 
       {/* ── Province selector ── */}
       <div style={{ marginBottom: 22 }}>
         <div style={{ fontSize: 11, fontWeight: 600, color: t.textFaint, textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 10 }}>
           Select province
         </div>
-        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+        <div style={{ display: "flex", gap: 8, flexWrap: isMobile ? "nowrap" : "wrap", overflowX: isMobile ? "auto" : "visible", paddingBottom: isMobile ? 4 : 0 }}>
           {PROVINCES.map((prov) => {
             const active = prov.id === provinceId
             return (
@@ -812,22 +822,24 @@ function DashboardPage() {
                 onClick={() => handleProvinceChange(prov.id)}
                 style={{
                   display: "flex", flexDirection: "column", alignItems: "flex-start",
-                  padding: "8px 14px", borderRadius: 10, border: `${active ? "1.5px" : "0.5px"} solid ${active ? prov.color : t.border}`,
+                  padding: isMobile ? "6px 10px" : "8px 14px", borderRadius: 10,
+                  border: `${active ? "1.5px" : "0.5px"} solid ${active ? prov.color : t.border}`,
                   background: active ? prov.color : t.surface,
-                  cursor: "pointer", transition: "all 0.15s", minWidth: 108,
+                  cursor: "pointer", transition: "all 0.15s",
+                  minWidth: isMobile ? 80 : 108, flexShrink: 0,
                 }}
                 onMouseEnter={(e) => { if (!active) { e.currentTarget.style.borderColor = prov.color; e.currentTarget.style.background = prov.color + "10" } }}
                 onMouseLeave={(e) => { if (!active) { e.currentTarget.style.borderColor = t.border; e.currentTarget.style.background = t.surface } }}
               >
-                <div style={{ fontSize: 10, fontWeight: 600, color: active ? "rgba(255,255,255,0.7)" : t.textFaint, marginBottom: 1 }}>
-                  Province {prov.number}
-                </div>
-                <div style={{ fontSize: 13, fontWeight: 700, color: active ? "#ffffff" : t.text }}>
+                {!isMobile && <div style={{ fontSize: 10, fontWeight: 600, color: active ? "rgba(255,255,255,0.7)" : t.textFaint, marginBottom: 1 }}>
+                  P{prov.number}
+                </div>}
+                <div style={{ fontSize: isMobile ? 11 : 13, fontWeight: 700, color: active ? "#ffffff" : t.text }}>
                   {prov.name}
                 </div>
-                <div style={{ fontSize: 10, color: active ? "rgba(255,255,255,0.65)" : t.textSub, marginTop: 1 }}>
+                {!isMobile && <div style={{ fontSize: 10, color: active ? "rgba(255,255,255,0.65)" : t.textSub, marginTop: 1 }}>
                   {prov.capital}
-                </div>
+                </div>}
               </button>
             )
           })}
@@ -835,24 +847,22 @@ function DashboardPage() {
       </div>
 
       {/* ── Header ── */}
-      <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", marginBottom: 22 }}>
+      <div style={{ display: "flex", flexDirection: isMobile ? "column" : "row", alignItems: "flex-start", justifyContent: "space-between", marginBottom: 16, gap: isMobile ? 10 : 0 }}>
         <div>
-          <h1 style={{ fontSize: 22, fontWeight: 700, color: t.text, margin: 0 }}>
+          <h1 style={{ fontSize: isMobile ? 18 : 22, fontWeight: 700, color: t.text, margin: 0 }}>
             Discover {province.name} Province
           </h1>
-          <p style={{ fontSize: 13, color: t.textSub, margin: "4px 0 0" }}>
-            {province.tagline} · Capital: {province.capital}
+          <p style={{ fontSize: 12, color: t.textSub, margin: "4px 0 0" }}>
+            {province.tagline}
           </p>
-          <div style={{ marginTop: 6, display: "inline-block", background: sd.highlight.length > 0 ? t.blueLight : "transparent", borderRadius: 6, padding: "3px 10px" }}>
-            <span style={{ fontSize: 11, color: t.blue }}>✦ {sd.highlight}</span>
-          </div>
         </div>
         {/* Season pills */}
-        <div style={{ display: "flex", gap: 4, background: t.surface, border: `0.5px solid ${t.border}`, borderRadius: 10, padding: 4, flexShrink: 0 }}>
+        <div style={{ display: "flex", gap: 4, background: t.surface, border: `0.5px solid ${t.border}`, borderRadius: 10, padding: 4, flexShrink: 0, overflowX: "auto" }}>
           {(["All", "Spring", "Summer", "Autumn", "Winter"] as Season[]).map((s) => (
             <button key={s} onClick={() => setSeason(s)} style={{
-              padding: "5px 14px", borderRadius: 7, border: "none", fontSize: 12,
-              fontWeight: 500, cursor: "pointer", transition: "all 0.15s",
+              padding: isMobile ? "4px 10px" : "5px 14px", borderRadius: 7, border: "none",
+              fontSize: isMobile ? 11 : 12,
+              fontWeight: 500, cursor: "pointer", transition: "all 0.15s", whiteSpace: "nowrap",
               background: season === s ? t.blue : "transparent",
               color: season === s ? "#ffffff" : t.textSub,
             }}>
@@ -863,7 +873,7 @@ function DashboardPage() {
       </div>
 
       {/* ── Metrics ── */}
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 16, marginBottom: 22 }}>
+      <div className="rsp-grid-4" style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr 1fr" : "repeat(4,1fr)", gap: isMobile ? 10 : 16, marginBottom: 22 }}>
         <MetricCard label="Visitors this season" value={sd.visitors} sub={`${season === "All" ? "Annual" : season} season total`} icon={<Users size={18} />} iconColor={t.blue} iconBg={t.blueLight} />
         <MetricCard label="Active places" value={String(sd.activePlaces)} sub="Open to visitors" icon={<Building2 size={18} />} iconColor={t.orange} iconBg={t.orangeLight} />
         <MetricCard label="Avg trip cost" value={sd.avgCost} sub="Per person · 3 days" icon={<Wallet size={18} />} iconColor={t.amber} iconBg={t.amberLight} />
@@ -1054,19 +1064,22 @@ function NoKeyPlaceholder({ t }: { t: Theme }) {
 interface RouteInfo { distance: string; duration: string }
 interface RouteAlternative { index: number; distance: string; duration: string; summary: string }
 
-function RouteMap({ origin, waypoints, viaPoints = [], destination, travelMode, isDark, t, onInfo, onRoutes, selectedRouteIndex = 0, pinLocations = [] }: {
+function RouteMap({ origin, waypoints, viaPoints = [], destination, travelMode, isDark, t, onInfo, onRoutes, selectedRouteIndex = 0, pinLocations = [], siteMarkers = [] }: {
   origin: string; waypoints: string[]; viaPoints?: string[]; destination: string
   travelMode: string; isDark?: boolean; t: Theme
   onInfo?: (info: RouteInfo) => void
   onRoutes?: (routes: RouteAlternative[]) => void
   selectedRouteIndex?: number
-  /** Extra locations to pin on the map via Places API — shown even if they can't be routed through */
   pinLocations?: string[]
+  /** Pre-geocoded interest-based sites — shown as colored pins without API call */
+  siteMarkers?: { name: string; lat: number; lng: number; emoji: string; category: string; colorKey: string }[]
 }) {
   const divRef        = useRef<HTMLDivElement>(null)
   const mapObj        = useRef<any>(null)
-  const renderersRef  = useRef<any[]>([])
-  const pinMarkersRef = useRef<any[]>([])
+  const renderersRef    = useRef<any[]>([])
+  const pinMarkersRef   = useRef<any[]>([])
+  const siteMarkersRef  = useRef<any[]>([])
+  const siteInfoWinRef  = useRef<any>(null)
   const [zeroResults, setZeroResults] = useState(false)
 
   const clearRenderers = () => {
@@ -1127,6 +1140,61 @@ function RouteMap({ origin, waypoints, viaPoints = [], destination, travelMode, 
     })
   }, [pinLocations.join("|")])
 
+  // ── Interest-based site markers (lat/lng known — no geocoding needed) ────────
+  useEffect(() => {
+    siteMarkersRef.current.forEach(m => { try { m.setMap(null) } catch {} })
+    siteMarkersRef.current = []
+    if (!siteMarkers.length || !GMAPS_KEY) return
+
+    // Use loadGMaps to ensure the API is ready, then add markers once map is initialised
+    loadGMaps(() => {
+      if (!mapObj.current) return
+      addSiteMarkers()
+    })
+    return
+
+    function addSiteMarkers() {
+    if (!siteMarkers.length || !(window as any).google?.maps || !mapObj.current) return
+
+    const g = (window as any).google.maps
+    if (!siteInfoWinRef.current) siteInfoWinRef.current = new g.InfoWindow()
+
+    const COLORS: Record<string, string> = {
+      blue: "#185FA5", orange: "#D85A30", green: "#3B6D11",
+      amber: "#BA7517", teal: "#1A6B5A", purple: "#6B3FA0", red: "#B91C1C",
+    }
+
+    siteMarkers.forEach(site => {
+      const col = COLORS[site.colorKey] || "#185FA5"
+      const marker = new g.Marker({
+        position: { lat: site.lat, lng: site.lng },
+        map: mapObj.current,
+        title: site.name,
+        zIndex: 45,
+        icon: {
+          // Teardrop shape
+          path: "M 0,-16 C -7,-16 -12,-10 -12,-4 C -12,5 0,16 0,16 C 0,16 12,5 12,-4 C 12,-10 7,-16 0,-16 Z",
+          fillColor: col, fillOpacity: 0.92,
+          strokeColor: "#ffffff", strokeWeight: 2,
+          scale: 0.85, anchor: new g.Point(0, 16),
+          labelOrigin: new g.Point(0, -3),
+        },
+        label: { text: site.emoji, fontSize: "13px" },
+      })
+      marker.addListener("click", () => {
+        siteInfoWinRef.current.setContent(
+          `<div style="font-family:Inter,sans-serif;padding:6px 8px 4px;min-width:140px">
+            <div style="font-size:13px;font-weight:700;color:#111827">${site.emoji} ${site.name}</div>
+            <div style="font-size:11px;color:#6B7280;margin-top:3px;text-transform:capitalize">${site.category}</div>
+          </div>`
+        )
+        siteInfoWinRef.current.open(mapObj.current, marker)
+      })
+      siteMarkersRef.current.push(marker)
+    })
+    } // end addSiteMarkers
+  }, [siteMarkers.map(s => s.name).join("|")])
+
   // Update polyline styles instantly when user switches routes (no re-fetch)
   useEffect(() => {
     renderersRef.current.forEach((r, i) => {
@@ -1144,9 +1212,13 @@ function RouteMap({ origin, waypoints, viaPoints = [], destination, travelMode, 
       if (cancelled || !divRef.current) return
       const g = (window as any).google.maps
 
+      const hasRoute = origin.trim().length > 0 && destination.trim().length > 0
+
       if (!mapObj.current) {
         mapObj.current = new g.Map(divRef.current, {
-          zoom: 9, center: { lat: 27.7172, lng: 85.324 },
+          // Nepal overview when no route; route area when destination known
+          zoom: hasRoute ? 9 : 7,
+          center: hasRoute ? { lat: 27.7172, lng: 85.324 } : { lat: 28.1, lng: 84.1 },
           styles: isDark ? DARK_STYLES : LIGHT_STYLES,
           disableDefaultUI: true, zoomControl: true, fullscreenControl: true,
         })
@@ -1156,7 +1228,7 @@ function RouteMap({ origin, waypoints, viaPoints = [], destination, travelMode, 
       // GPS coordinates (e.g. "27.712,85.324") must NOT have ", Nepal" appended
       const addNepal = (s: string) => {
         const t = s.trim()
-        if (/^-?\d+\.?\d*,\s*-?\d+\.?\d*$/.test(t)) return t  // raw lat,lng — use as-is
+        if (/^-?\d+\.?\d*,\s*-?\d+\.?\d*$/.test(t)) return t
         return t.toLowerCase().includes("nepal") ? t : `${t}, Nepal`
       }
       const modeMap: Record<string, string> = { driving: "DRIVING", walking: "WALKING", transit: "TRANSIT" }
@@ -1222,8 +1294,8 @@ function RouteMap({ origin, waypoints, viaPoints = [], destination, travelMode, 
         if (alternatives[selectedRouteIndex]) onInfo?.(alternatives[selectedRouteIndex])
       }  // end routeHandler
 
-      // Start routing — passes waypoints first, retries without if they fail
-      doRoute(waypoints.filter(Boolean))
+      // Only request directions when both ends are known
+      if (hasRoute) doRoute(waypoints.filter(Boolean))
     })
 
     return () => { cancelled = true; clearPinMarkers() }
@@ -1281,7 +1353,7 @@ function ItineraryMap({ dest, itinerary, activeDay, from, isDark, t }: {
 }
 
 function PathfinderPage() {
-  const { t, isDark, pendingNav, clearNav } = useT()
+  const { t, isDark, isMobile, pendingNav, clearNav } = useT()
 
   const [origin,      setOrigin]      = useState("")
   const [destination, setDestination] = useState("")
@@ -1340,12 +1412,15 @@ function PathfinderPage() {
   }
 
   return (
-    <div style={{ display: "flex", height: "100%", minHeight: "100vh" }}>
+    <div style={{ display: "flex", flexDirection: isMobile ? "column" : "row", height: isMobile ? "auto" : "100%", minHeight: "100vh" }}>
 
       {/* ── Left panel: route builder ─────────────────────────────────────── */}
       <div style={{
-        width: 340, minWidth: 340, background: t.surface,
-        borderRight: `0.5px solid ${t.border}`,
+        width: isMobile ? "100%" : 340,
+        minWidth: isMobile ? 0 : 340,
+        background: t.surface,
+        borderRight: isMobile ? "none" : `0.5px solid ${t.border}`,
+        borderBottom: isMobile ? `0.5px solid ${t.border}` : "none",
         display: "flex", flexDirection: "column", overflowY: "auto",
       }}>
         {/* Header */}
@@ -1518,7 +1593,7 @@ function PathfinderPage() {
       </div>
 
       {/* ── Right panel: live Google Map (always visible) ─────────────────── */}
-      <div style={{ flex: 1, position: "relative", overflow: "hidden" }}>
+      <div style={{ flex: 1, position: "relative", overflow: "hidden", minHeight: isMobile ? 350 : undefined }}>
         {/* Map header bar */}
         <div style={{ position: "absolute", top: 0, left: 0, right: 0, zIndex: 10, background: t.surface, borderBottom: `0.5px solid ${t.border}`, padding: "10px 16px", display: "flex", alignItems: "center", gap: 8 }}>
           <Badge color={t.green} bg={t.greenLight}>Google Maps · Live</Badge>
@@ -1782,7 +1857,7 @@ const NEARBY_COLORS: Record<string, string> = {
 }
 
 function NearbyPage() {
-  const { t, isDark, navigateTo } = useT()
+  const { t, isDark, isMobile, navigateTo } = useT()
 
   // GPS state
   const [gpsStatus,    setGpsStatus]    = useState<"requesting"|"granted"|"denied">("requesting")
@@ -1933,10 +2008,10 @@ function NearbyPage() {
   }
 
   return (
-    <div style={{ display:"flex", height:"100vh", overflow:"hidden" }}>
+    <div style={{ display:"flex", flexDirection: isMobile ? "column-reverse" : "row", height: isMobile ? "auto" : "100vh", minHeight:"100vh", overflow: isMobile ? "auto" : "hidden" }}>
 
       {/* ═══ LEFT: Live Google Map (65%) ═══════════════════════════════════ */}
-      <div style={{ flex:"0 0 65%", position:"relative", background: t.subtle, overflow:"hidden" }}>
+      <div style={{ flex: isMobile ? "none" : "0 0 65%", height: isMobile ? 340 : undefined, position:"relative", background: t.subtle, overflow:"hidden" }}>
 
         {/* Map container */}
         <div ref={mapDivRef} style={{ position:"absolute", inset:0 }} />
@@ -1997,7 +2072,7 @@ function NearbyPage() {
       </div>
 
       {/* ═══ RIGHT: Nearby Panel (35%) ══════════════════════════════════════ */}
-      <div style={{ flex:"0 0 35%", display:"flex", flexDirection:"column", background:"white", borderLeft:"0.5px solid #E5E7EB", overflow:"hidden" }}>
+      <div style={{ flex: isMobile ? "none" : "0 0 35%", display:"flex", flexDirection:"column", background:"white", borderLeft: isMobile ? "none" : "0.5px solid #E5E7EB", borderBottom: isMobile ? "0.5px solid #E5E7EB" : "none", overflow: isMobile ? "visible" : "hidden" }}>
 
         {/* Header */}
         <div style={{ padding:"14px 16px 10px", borderBottom:"0.5px solid #E5E7EB", flexShrink:0 }}>
@@ -2155,7 +2230,7 @@ function NearbyPage() {
 
 
 function BookingPage() {
-  const { t, isDark, navigateTo } = useT()
+  const { t, isDark, isMobile, navigateTo } = useT()
 
   // ── GPS detection ─────────────────────────────────────────────────────────
   const [gpsStatus,   setGpsStatus]   = useState<"requesting"|"granted"|"denied">("requesting")
@@ -2315,13 +2390,13 @@ function BookingPage() {
   const selected = places.find(p => p.place_id === selectedId)
 
   return (
-    <div style={{ display:"flex", height:"100vh", overflow:"hidden" }}>
+    <div style={{ display:"flex", flexDirection: isMobile ? "column" : "row", height: isMobile ? "auto" : "100vh", minHeight:"100vh", overflow: isMobile ? "auto" : "hidden" }}>
 
       {/* Invisible div for PlacesService */}
       <div ref={hiddenRef} style={{ position:"fixed", width:1, height:1, opacity:0, pointerEvents:"none", left:-9999 }} />
 
       {/* ── LEFT: Cards (65%) ──────────────────────────────────────────────── */}
-      <div style={{ flex:"0 0 65%", display:"flex", flexDirection:"column", overflow:"hidden", borderRight:`0.5px solid ${t.border}` }}>
+      <div style={{ flex: isMobile ? "none" : "0 0 65%", display:"flex", flexDirection:"column", overflow: isMobile ? "visible" : "hidden", borderRight: isMobile ? "none" : `0.5px solid ${t.border}` }}>
 
         {/* Header */}
         <div style={{ padding:"18px 20px 14px", borderBottom:`0.5px solid ${t.border}`, background:t.surface, flexShrink:0 }}>
@@ -2362,7 +2437,7 @@ function BookingPage() {
         <div style={{ flex:1, overflowY:"auto", padding:16 }}>
 
           {loading ? (
-            <div style={{ display:"grid", gridTemplateColumns:"repeat(2,1fr)", gap:12 }}>
+            <div style={{ display:"grid", gridTemplateColumns: isMobile ? "1fr" : "repeat(2,1fr)", gap:12 }}>
               {Array.from({length:6}).map((_,i) => (
                 <div key={i} style={{ borderRadius:12, border:`0.5px solid ${t.border}`, overflow:"hidden", background:t.surface }}>
                   <div style={{ height:160, background:t.subtle, animation:"shimmer 1.5s ease-in-out infinite" }} />
@@ -2380,7 +2455,7 @@ function BookingPage() {
               <div style={{ fontSize:12, color:t.textSub }}>Try switching to a different category or check your location</div>
             </div>
           ) : (
-            <div style={{ display:"grid", gridTemplateColumns:"repeat(2,1fr)", gap:12 }}>
+            <div style={{ display:"grid", gridTemplateColumns: isMobile ? "1fr" : "repeat(2,1fr)", gap:12 }}>
               {places.map(place => {
                 const photo      = getPhoto(place)
                 const isSelected = place.place_id === selectedId
@@ -2484,7 +2559,7 @@ function BookingPage() {
       </div>
 
       {/* ── RIGHT: Live Map (35%) ────────────────────────────────────────────── */}
-      <div style={{ flex:"0 0 35%", display:"flex", flexDirection:"column", overflow:"hidden" }}>
+      <div style={{ flex: isMobile ? "none" : "0 0 35%", height: isMobile ? 300 : undefined, display:"flex", flexDirection:"column", overflow:"hidden" }}>
 
         {/* Map */}
         <div ref={mapRef} style={{ flex:1 }} />
@@ -2549,24 +2624,76 @@ function BookingPage() {
 
 // ── Local mock fallbacks (used when both Flask backend and Supabase are offline) ─
 
-function mockMLRecommend(budget: number, purposes: string[], days: number): Destination[] {
+// Detect which Nepal province the destination belongs to
+function detectDestinationProvince(dest: string): string | null {
+  const d = dest.toLowerCase()
+  if (/kathmandu|patan|lalitpur|bhaktapur|bagmati|namobuddha|dhulikhel|nagarkot|boudha|swayambhu|pashupatinath|changu/.test(d)) return "Bagmati"
+  if (/pokhara|kaski|gandaki|annapurna|mustang|gorkha|bandipur|sarangkot|begnas|manaslu|poon hill|beni|baglung/.test(d)) return "Gandaki"
+  if (/chitwan|lumbini|butwal|palpa|tansen|narayanghat|bharatpur|janakpur|palpa|kapilvastu|bhairahawa|rupandehi/.test(d)) return "Lumbini"
+  if (/biratnagar|dharan|ilam|taplejung|koshi|sunsari|morang|sankhuwasabha|hile/.test(d)) return "Koshi"
+  if (/janakpur|madhesh|dhanusha|siraha|sarlahi|mahottari|bara|parsa|rautahat/.test(d)) return "Madhesh"
+  if (/rara|jumla|karnali|surkhet|birendranagar|dolpo|mugu|dailekh/.test(d)) return "Karnali"
+  if (/dhangadhi|kanchanpur|sudurpashchim|darchula|bajura|bajhang|dadeldhura/.test(d)) return "Sudurpashchim"
+  return null
+}
+
+function mockMLRecommend(budget: number, purposes: string[], days: number, destination = ""): Destination[] {
   const pool: Destination[] = [
-    { name:"Pashupatinath Temple", district:"Kathmandu",      province:"Bagmati",   categories:["cultural","spiritual"], costPerDay:800,  score:0.95, emoji:"🛕", highlights:["UNESCO listed","Hindu heritage","Evening aarti"] },
-    { name:"Boudhanath Stupa",     district:"Kathmandu",      province:"Bagmati",   categories:["cultural","spiritual"], costPerDay:600,  score:0.92, emoji:"🏛", highlights:["World's largest stupa","Kora circuit"] },
-    { name:"Changu Narayan",       district:"Bhaktapur",      province:"Bagmati",   categories:["history","cultural"],   costPerDay:700,  score:0.88, emoji:"🏯", highlights:["Oldest temple","UNESCO site"] },
-    { name:"Namobuddha Monastery", district:"Kavrepalanchok", province:"Bagmati",   categories:["spiritual","nature"],   costPerDay:900,  score:0.85, emoji:"🌄", highlights:["Sacred Buddhist site","Forest trails"] },
-    { name:"Chitwan National Park",district:"Chitwan",        province:"Lumbini",   categories:["wildlife","nature"],    costPerDay:2200, score:0.90, emoji:"🐘", highlights:["One-horned rhinos","Jungle safari"] },
-    { name:"Phewa Lake Pokhara",   district:"Kaski",          province:"Gandaki",   categories:["nature","cultural"],    costPerDay:1200, score:0.87, emoji:"🌊", highlights:["Boating","Paragliding","Peace Pagoda"] },
-    { name:"Lumbini Sacred Garden",district:"Rupandehi",      province:"Lumbini",   categories:["spiritual","history"],  costPerDay:600,  score:0.84, emoji:"☮",  highlights:["Buddha birthplace","UNESCO site"] },
-    { name:"Annapurna Base Camp",  district:"Kaski",          province:"Gandaki",   categories:["adventure","nature"],   costPerDay:2800, score:0.91, emoji:"🏔", highlights:["Himalayan panorama","World-class trek"] },
+    // ── Bagmati Province ──────────────────────────────────────────────────────
+    { name:"Pashupatinath Temple",  district:"Kathmandu",       province:"Bagmati",       categories:["cultural","spiritual"], costPerDay:800,  score:0.95, emoji:"🛕", highlights:["UNESCO listed","Hindu heritage","Evening aarti","Sacred ghats"] },
+    { name:"Boudhanath Stupa",      district:"Kathmandu",       province:"Bagmati",       categories:["cultural","spiritual"], costPerDay:600,  score:0.92, emoji:"🏛", highlights:["World's largest stupa","Tibetan hub","Kora circuit"] },
+    { name:"Patan Durbar Square",   district:"Lalitpur",        province:"Bagmati",       categories:["history","cultural"],   costPerDay:650,  score:0.90, emoji:"🏰", highlights:["Malla palace","Newari architecture","Patan Museum"] },
+    { name:"Bhaktapur Durbar Sq",   district:"Bhaktapur",       province:"Bagmati",       categories:["history","cultural"],   costPerDay:750,  score:0.89, emoji:"🏯", highlights:["55-Window Palace","Pottery square","Medieval city"] },
+    { name:"Changu Narayan",        district:"Bhaktapur",       province:"Bagmati",       categories:["history","spiritual"],  costPerDay:700,  score:0.86, emoji:"🛕", highlights:["Oldest temple in Nepal","Stone carvings","UNESCO site"] },
+    { name:"Namobuddha Monastery",  district:"Kavrepalanchok",  province:"Bagmati",       categories:["spiritual","nature"],   costPerDay:900,  score:0.84, emoji:"🌄", highlights:["Sacred Buddhist site","Himalayan views","Forest trails"] },
+    { name:"Swayambhunath Stupa",   district:"Kathmandu",       province:"Bagmati",       categories:["spiritual","cultural"], costPerDay:550,  score:0.88, emoji:"🐵", highlights:["Monkey temple","Kathmandu panorama","Ancient stupa"] },
+    { name:"Shivapuri Nat. Park",   district:"Kathmandu",       province:"Bagmati",       categories:["wildlife","nature"],    costPerDay:500,  score:0.80, emoji:"🌿", highlights:["Day hikes","Leopards & langurs","Bird watching"] },
+    { name:"Nagarkot",              district:"Bhaktapur",       province:"Bagmati",       categories:["nature","cultural"],    costPerDay:1200, score:0.83, emoji:"🌄", highlights:["Himalayan sunrise","Mountain panorama","Hill resort"] },
+    { name:"Dhulikhel",             district:"Kavrepalanchok",  province:"Bagmati",       categories:["nature","cultural"],    costPerDay:1000, score:0.82, emoji:"🏔", highlights:["Himalaya views","Cycling trails","Heritage town"] },
+    // ── Gandaki Province ─────────────────────────────────────────────────────
+    { name:"Phewa Lake Pokhara",    district:"Kaski",           province:"Gandaki",       categories:["nature","cultural"],    costPerDay:1200, score:0.92, emoji:"🌊", highlights:["Boating on Phewa","Fish Tail reflection","Paragliding"] },
+    { name:"Sarangkot Viewpoint",   district:"Kaski",           province:"Gandaki",       categories:["nature","adventure"],   costPerDay:800,  score:0.87, emoji:"🌅", highlights:["Famous sunrise","Dhaulagiri views","Paragliding launch"] },
+    { name:"Peace Pagoda Pokhara",  district:"Kaski",           province:"Gandaki",       categories:["spiritual","nature"],   costPerDay:600,  score:0.84, emoji:"☮",  highlights:["Japanese peace stupa","Lakeside views","Peaceful retreat"] },
+    { name:"Bandipur Village",      district:"Tanahun",         province:"Gandaki",       categories:["heritage","cultural"],  costPerDay:800,  score:0.85, emoji:"🏘", highlights:["Medieval Newari town","Himalama panorama","Car-free streets"] },
+    { name:"Manakamana Temple",     district:"Gorkha",          province:"Gandaki",       categories:["spiritual","cultural"], costPerDay:700,  score:0.86, emoji:"🛕", highlights:["Cable car ride","Goddess temple","Valley views"] },
+    { name:"Begnas Lake",           district:"Kaski",           province:"Gandaki",       categories:["nature","cultural"],    costPerDay:700,  score:0.80, emoji:"🏞", highlights:["Serene lake","Boating","Rural Nepal experience"] },
+    { name:"Gorkha Durbar",         district:"Gorkha",          province:"Gandaki",       categories:["history","cultural"],   costPerDay:600,  score:0.81, emoji:"🏰", highlights:["Palace of kings","Birthplace of Prithvi","Valley views"] },
+    // ── Lumbini Province ─────────────────────────────────────────────────────
+    { name:"Lumbini Sacred Garden", district:"Rupandehi",       province:"Lumbini",       categories:["spiritual","history"],  costPerDay:600,  score:0.91, emoji:"☮",  highlights:["Buddha birthplace","UNESCO site","Maya Devi Temple"] },
+    { name:"Chitwan National Park", district:"Chitwan",         province:"Lumbini",       categories:["wildlife","nature"],    costPerDay:2200, score:0.93, emoji:"🐘", highlights:["One-horned rhinos","Bengal tigers","Jungle safari"] },
+    { name:"Tansen Palpa",          district:"Palpa",           province:"Lumbini",       categories:["heritage","cultural"],  costPerDay:700,  score:0.82, emoji:"⛩",  highlights:["Heritage hill town","Dhaka weaving","Rani Mahal"] },
+    { name:"Beeshazar Lake",        district:"Chitwan",         province:"Lumbini",       categories:["wildlife","nature"],    costPerDay:800,  score:0.79, emoji:"🦏", highlights:["Wetland wildlife","Bird watching","Rhino sightings"] },
+    // ── Koshi Province ───────────────────────────────────────────────────────
+    { name:"Pathibhara Temple",     district:"Taplejung",       province:"Koshi",         categories:["spiritual","nature"],   costPerDay:400,  score:0.84, emoji:"🛕", highlights:["High altitude temple","Pilgrimage site","Mountain panorama"] },
+    { name:"Ilam Tea Gardens",      district:"Ilam",            province:"Koshi",         categories:["nature","cultural"],    costPerDay:600,  score:0.81, emoji:"🍃", highlights:["Rolling tea hills","Orthodox tea","Sunrise views"] },
+    { name:"Koshi Tappu Reserve",   district:"Sunsari",         province:"Koshi",         categories:["wildlife","nature"],    costPerDay:600,  score:0.78, emoji:"🦏", highlights:["Wild water buffalo","Migratory birds","River ecosystem"] },
+    // ── Madhesh Province ─────────────────────────────────────────────────────
+    { name:"Janaki Temple",         district:"Dhanusha",        province:"Madhesh",       categories:["spiritual","history"],  costPerDay:400,  score:0.85, emoji:"🏛", highlights:["Ram-Sita birthplace","Maithili art","Ornate architecture"] },
+    { name:"Parsa National Park",   district:"Parsa",           province:"Madhesh",       categories:["wildlife","nature"],    costPerDay:800,  score:0.76, emoji:"🐅", highlights:["Royal Bengal tiger","Gaur bison","Dense Sal forest"] },
+    // ── Karnali Province ─────────────────────────────────────────────────────
+    { name:"Rara National Park",    district:"Mugu",            province:"Karnali",       categories:["nature","wildlife"],    costPerDay:3800, score:0.88, emoji:"🏞", highlights:["Nepal's largest lake","Remote wilderness","Crystal water"] },
+    { name:"Khaptad National Park", district:"Achham",          province:"Karnali",       categories:["nature","spiritual"],   costPerDay:800,  score:0.79, emoji:"🌿", highlights:["Plateau grasslands","Hindu pilgrimage","Rare plants"] },
+    // ── Sudurpashchim Province ────────────────────────────────────────────────
+    { name:"Shuklaphanta Nat. Park",district:"Kanchanpur",      province:"Sudurpashchim", categories:["wildlife","nature"],    costPerDay:600,  score:0.82, emoji:"🐆", highlights:["Largest swamp deer herd","Royal Bengal tiger","Grasslands"] },
+    { name:"Badimalika Temple",     district:"Bajura",          province:"Sudurpashchim", categories:["spiritual","nature"],   costPerDay:400,  score:0.74, emoji:"🌺", highlights:["High altitude pilgrimage","Sacred goddess","Alpine meadows"] },
   ]
-  const daily = budget / Math.max(days, 1)
-  return pool
-    .filter(d => {
-      const affordable = d.costPerDay <= daily * 1.4
-      const match = purposes.length === 0 || purposes.some(p => d.categories.includes(p))
-      return affordable && match
+
+  const daily       = budget / Math.max(days, 1)
+  const targetProv  = detectDestinationProvince(destination)
+
+  const scored = pool
+    .map(d => {
+      const affordable   = d.costPerDay <= daily * 1.4
+      const purposeMatch = purposes.length === 0 || purposes.some(p => (d.categories ?? []).includes(p))
+      if (!affordable || !purposeMatch) return null
+
+      // Boost score if province matches the typed destination
+      const provinceMult = targetProv && d.province === targetProv ? 1.18 : targetProv ? 0.72 : 1.0
+      return { ...d, score: Math.min(0.99, d.score * provinceMult) }
     })
+    .filter(Boolean) as Destination[]
+
+  return scored
     .sort((a, b) => b.score - a.score)
     .slice(0, 6)
 }
@@ -2641,6 +2768,123 @@ const PURPOSE_OPTIONS = [
 // Timeout wrapper — ensures promises never hang the UI indefinitely
 function withTimeout<T>(p: Promise<T | null>, ms: number): Promise<T | null> {
   return Promise.race([p, new Promise<null>(res => setTimeout(() => res(null), ms))])
+}
+
+// ── Floating trip assistant bubble (🤖) shown after itinerary is generated ────
+
+interface AssistantMsg { id: string; role: "bot" | "user"; text: string; chips?: string[] }
+
+function FloatingTripAssistant({ from, dest, itinerary, budget, days, travelMode, t, onSetDays, onSetBudget, onSetTravelMode, onReplan, onOpenMaps }: {
+  from: string; dest: Destination; itinerary: DayPlan[]; budget: number; days: number
+  travelMode: string; t: Theme
+  onSetDays: (n: number) => void; onSetBudget: (n: number) => void
+  onSetTravelMode: (m: string) => void; onReplan: () => void
+  onOpenMaps: (mode?: string, day?: number) => void
+}) {
+  const [open, setOpen] = useState(false)
+  const [input, setInput] = useState("")
+  const [msgs, setMsgs] = useState<AssistantMsg[]>([{
+    id: "welcome", role: "bot",
+    text: `Your ${days}-day trip to ${dest.name} is ready! I can help you adjust it or open it in Google Maps.`,
+    chips: ["🗺 Open in Google Maps", "➕ Add 1 more day", "🍜 Food nearby"],
+  }])
+  const bottomRef = useRef<HTMLDivElement>(null)
+  useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: "smooth" }) }, [msgs])
+
+  async function send(text: string) {
+    if (!text.trim()) return
+    setMsgs(prev => [...prev, { id: Date.now().toString(), role: "user", text }])
+    setInput("")
+    const t2 = text.toLowerCase()
+    let reply = `I can help! Try: "Add 2 days", "Budget Rs 5000", "Open in Google Maps", or "What to eat there".`
+    let chips = ["🗺 Open in Google Maps", "➕ Add 1 day", "🌤 Weather info"]
+    if (/open|map|navigate/.test(t2)) { onOpenMaps(travelMode); reply = "Opening Google Maps with your full itinerary! 🗺" }
+    else if (/add (\d+)|(\d+) more day/.test(t2)) { const m = t2.match(/(\d+)/); const n=m?parseInt(m[1]):1; onSetDays(days+n); setTimeout(onReplan,100); reply=`Adding ${n} day${n>1?"s":""}—replanning now…` }
+    else if (/budget|rs|rupee/.test(t2)) { const m = t2.match(/(\d[\d,]+)/); if(m){const n=parseInt(m[1].replace(/,/g,""));onSetBudget(n);setTimeout(onReplan,100);reply=`Budget updated to Rs ${n.toLocaleString()}—replanning…`} }
+    else if (/walk|foot/.test(t2)) { onSetTravelMode("walking"); reply="Travel mode set to 🚶 walking." }
+    else if (/transit|bus/.test(t2)) { onSetTravelMode("transit"); reply="Travel mode set to 🚌 transit." }
+    else if (/drive|car|taxi/.test(t2)) { onSetTravelMode("driving"); reply="Travel mode set to 🚗 driving." }
+    else if (/food|eat|restaur|lunch|dinner/.test(t2)) { reply=`Great food near ${dest.name}:\n• Dal-bhat Rs 200–400\n• Newari thali Rs 300–600\n• Street momos Rs 80–150` }
+    else if (/hotel|stay|sleep/.test(t2)) { reply=`Accommodation near ${dest.district}:\n• Budget Rs 800–1,500/night\n• Mid-range Rs 2,500–4,500/night\n• Heritage Rs 6,000+/night` }
+    else if (/weather|rain|cold|season/.test(t2)) { reply="Spring (Mar–May): 15–25°C ☀️ ideal\nAutumn (Sep–Nov): 12–22°C 🍂 peak season\nSummer: monsoon 🌧\nWinter: dry & crisp ❄️" }
+    setTimeout(() => setMsgs(prev => [...prev, { id: Date.now()+"-bot", role: "bot", text: reply, chips }]), 300)
+  }
+
+  return (
+    <div style={{ position: "fixed", bottom: 24, right: 24, zIndex: 200 }}>
+      {!open ? (
+        <button onClick={() => setOpen(true)} style={{ width: 52, height: 52, borderRadius: "50%", border: "none", background: t.blue, color: "#fff", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", boxShadow: "0 4px 18px rgba(24,95,165,0.45)", fontSize: 22 }} title="Trip assistant">🤖</button>
+      ) : (
+        <div style={{ width: 320, borderRadius: 14, overflow: "hidden", border: `0.5px solid ${t.border}`, boxShadow: "0 8px 32px rgba(0,0,0,0.18)", display: "flex", flexDirection: "column", maxHeight: 480, background: t.surface }}>
+          <div style={{ background: t.blue, padding: "11px 14px", display: "flex", alignItems: "center", gap: 9 }}>
+            <span style={{ fontSize: 18 }}>🤖</span>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontSize: 12, fontWeight: 700, color: "#fff" }}>Trip assistant</div>
+              <div style={{ fontSize: 10, color: "rgba(255,255,255,0.7)" }}>{dest.name} · {days} days</div>
+            </div>
+            <button onClick={() => setOpen(false)} style={{ background: "none", border: "none", color: "rgba(255,255,255,0.8)", cursor: "pointer", fontSize: 16, padding: 2 }}>×</button>
+          </div>
+          <div style={{ flex: 1, overflowY: "auto", padding: "12px 14px", display: "flex", flexDirection: "column", gap: 10 }}>
+            {msgs.map(msg => (
+              <div key={msg.id}>
+                {msg.role === "user" ? (
+                  <div style={{ display: "flex", justifyContent: "flex-end" }}>
+                    <div style={{ background: t.blue, color: "#fff", borderRadius: "12px 12px 2px 12px", padding: "7px 11px", fontSize: 12, maxWidth: 220 }}>{msg.text}</div>
+                  </div>
+                ) : (
+                  <div>
+                    <div style={{ background: t.subtle, borderRadius: "2px 12px 12px 12px", padding: "8px 11px", fontSize: 12, color: t.text, lineHeight: 1.55, whiteSpace: "pre-line", maxWidth: 260 }}>{msg.text}</div>
+                    {msg.chips && (
+                      <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginTop: 6 }}>
+                        {msg.chips.map(chip => (
+                          <button key={chip} onClick={() => send(chip)} style={{ padding: "4px 9px", borderRadius: 20, border: `0.5px solid ${t.border}`, background: t.surface, color: t.blue, fontSize: 10, fontWeight: 500, cursor: "pointer" }}>{chip}</button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            ))}
+            <div ref={bottomRef} />
+          </div>
+          <div style={{ padding: "8px 14px 12px", borderTop: `0.5px solid ${t.border}`, display: "flex", gap: 8 }}>
+            <input value={input} onChange={e => setInput(e.target.value)} onKeyDown={e => e.key === "Enter" && send(input)} placeholder="Ask me anything…" style={{ flex: 1, height: 34, border: `0.5px solid ${t.border}`, borderRadius: 8, padding: "0 10px", fontSize: 12, color: t.text, background: t.subtle, outline: "none" }} />
+            <button onClick={() => send(input)} style={{ width: 34, height: 34, borderRadius: 8, border: "none", background: t.blue, color: "#fff", cursor: "pointer", fontSize: 15, display: "flex", alignItems: "center", justifyContent: "center" }}>
+              <Send size={14} />
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// Build a Google Maps Directions URL from itinerary stops
+function buildGoogleMapsUrl(
+  from: string,
+  dest: Destination,
+  itinerary: DayPlan[],
+  mode = "driving",
+  dayIndex?: number
+): string {
+  const enc = (s: string) => encodeURIComponent(`${s}, Nepal`)
+  const activities = dayIndex !== undefined
+    ? (itinerary[dayIndex]?.activities ?? [])
+    : itinerary.flatMap(d => d.activities)
+
+  const waypoints = activities
+    .filter(a => !["🚌", "🏠", "🏨", "🍽", "🍜", "🍱", "🌱"].includes(a.icon))
+    .slice(0, 7)
+    .map(a => enc(a.title))
+    .join("|")
+
+  return (
+    `https://www.google.com/maps/dir/?api=1` +
+    `&origin=${enc(from)}` +
+    `&destination=${enc(`${dest.name}, ${dest.district || "Nepal"}`)}` +
+    (waypoints ? `&waypoints=${waypoints}` : "") +
+    `&travelmode=${mode}`
+  )
 }
 
 // ─── Smart Planner (unified AI destination finder + itinerary builder) ────────
@@ -3053,7 +3297,7 @@ function FacilitiesOnRoute({ from, destination, routeInfo, t }: {
 }
 
 function SmartPlannerPage() {
-  const { t, isDark } = useT()
+  const { t, isDark, isMobile } = useT()
 
   // ── Input state ──────────────────────────────────────────────────────────
   const [destination,    setDestination]    = useState("")   // "where to?" — asked first
@@ -3169,7 +3413,7 @@ function SmartPlannerPage() {
         if (destinations.length === 0) throw new Error("empty")
       } catch {
         // 3. Local TF-IDF mock
-        destinations = mockMLRecommend(budget, purposes, days)
+        destinations = mockMLRecommend(budget, purposes, days, destination)
       }
     }
 
@@ -3235,7 +3479,6 @@ function SmartPlannerPage() {
 
   // Determine what destination to show on the right-panel map
   const mapDest = (() => {
-    // Use only the place name + Nepal — district names cause ZERO_RESULTS
     if ((phase === "itinerary" || phase === "planning") && selected) return `${selected.name}, Nepal`
     if (debouncedDest) {
       const clean = debouncedDest.replace(/,\s*Nepal$/i, "").trim()
@@ -3244,6 +3487,31 @@ function SmartPlannerPage() {
     if (phase === "destinations" && recommendations[0]) return `${recommendations[0].name}, Nepal`
     return ""
   })()
+
+  // ── Interest-category → site category mapping ─────────────────────────────
+  const INTEREST_CATS: Record<string, string[]> = {
+    cultural:  ["cultural", "heritage", "art"],
+    wildlife:  ["wildlife"],
+    history:   ["history", "heritage"],
+    spiritual: ["spiritual", "buddhist"],
+    nature:    ["nature"],
+    adventure: ["adventure", "trekking"],
+  }
+
+  // Filter ALL_NEPAL_SITES by selected purposes → shown as pins on the map
+  const interestSites = purposes.length === 0 ? [] :
+    ALL_NEPAL_SITES.filter(site =>
+      purposes.some(p =>
+        (INTEREST_CATS[p] ?? [p]).some(c => (site.categories ?? []).includes(c))
+      )
+    ).map(site => ({
+      name:     site.name,
+      lat:      site.lat,
+      lng:      site.lng,
+      emoji:    site.emoji,
+      category: site.categories[0] ?? "",
+      colorKey: site.colorKey,
+    }))
 
   // Build the Google Maps URL for "Open in Google Maps"
   const openMapsUrl = phase === "itinerary" && selected
@@ -3260,13 +3528,17 @@ function SmartPlannerPage() {
   }
 
   return (
-    <div style={{ display: "flex", height: "100%", minHeight: "100vh" }}>
+    <div style={{ display: "flex", flexDirection: isMobile ? "column" : "row", height: isMobile ? "auto" : "100%", minHeight: "100vh" }}>
 
       {/* ── Left panel: inputs + recommendations ─────────────────────────── */}
       <div style={{
-        width: 380, minWidth: 380, borderRight: `0.5px solid ${t.border}`,
+        width: isMobile ? "100%" : 380,
+        minWidth: isMobile ? 0 : 380,
+        borderRight: isMobile ? "none" : `0.5px solid ${t.border}`,
+        borderBottom: isMobile ? `0.5px solid ${t.border}` : "none",
         display: "flex", flexDirection: "column", overflowY: "auto",
         background: t.surface,
+        maxHeight: isMobile ? "60vh" : undefined,
       }}>
         {/* Header */}
         <div style={{ padding: "20px 20px 16px", borderBottom: `0.5px solid ${t.border}` }}>
@@ -3313,32 +3585,45 @@ function SmartPlannerPage() {
               Popular trips in Nepal 🇳🇵
             </div>
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 7 }}>
-              {SUGGESTED_TRIPS.map(trip => (
-                <button
-                  key={trip.name}
-                  onClick={() => {
-                    setDestination(trip.name)
-                    if (budget === 0) setBudget(trip.minBudget)
-                    if (days === 0) setDays(trip.minDays)
-                  }}
-                  style={{
-                    display: "flex", flexDirection: "column", alignItems: "flex-start",
-                    padding: "10px 12px", borderRadius: 10, border: `0.5px solid ${t.border}`,
-                    background: trip.bg, cursor: "pointer", textAlign: "left",
-                    transition: "all 0.15s",
-                  }}
-                  onMouseEnter={e => { e.currentTarget.style.transform = "translateY(-1px)"; e.currentTarget.style.boxShadow = "0 4px 12px rgba(0,0,0,0.1)" }}
-                  onMouseLeave={e => { e.currentTarget.style.transform = ""; e.currentTarget.style.boxShadow = "" }}
-                >
-                  <span style={{ fontSize: 22, marginBottom: 4 }}>{trip.emoji}</span>
-                  <div style={{ fontSize: 12, fontWeight: 700, color: t.text, lineHeight: 1.2, marginBottom: 2 }}>{trip.name}</div>
-                  <div style={{ fontSize: 9, color: t.textSub, marginBottom: 4 }}>{trip.tag}</div>
-                  <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
-                    <span style={{ fontSize: 8, color: t.textFaint, background: "rgba(255,255,255,0.7)", borderRadius: 4, padding: "1px 5px" }}>{trip.days}</span>
-                    <span style={{ fontSize: 8, color: t.textFaint, background: "rgba(255,255,255,0.7)", borderRadius: 4, padding: "1px 5px" }}>{trip.season}</span>
-                  </div>
-                </button>
-              ))}
+              {SUGGESTED_TRIPS.map(trip => {
+                // In dark mode use the theme surface + a colored left border accent instead of pastel backgrounds
+                const cardBg   = isDark ? t.subtle : trip.bg
+                const pillBg   = isDark ? t.surface : "rgba(255,255,255,0.75)"
+                const pillColor = isDark ? t.textSub : t.textFaint
+                // Pick an accent color from the card bg for the left border
+                const accentMap: Record<string, string> = {
+                  "#EBF2FB": t.blue, "#EAF2E0": t.green,
+                  "#FBF3E2": t.amber, "#FBEEE8": t.orange,
+                }
+                const accent = accentMap[trip.bg] ?? t.blue
+                return (
+                  <button
+                    key={trip.name}
+                    onClick={() => {
+                      setDestination(trip.name)
+                      if (budget === 0) setBudget(trip.minBudget)
+                      if (days === 0) setDays(trip.minDays)
+                    }}
+                    style={{
+                      display: "flex", flexDirection: "column", alignItems: "flex-start",
+                      padding: "10px 12px", borderRadius: 10, cursor: "pointer", textAlign: "left",
+                      transition: "all 0.15s", background: cardBg,
+                      border: `0.5px solid ${isDark ? t.border : "transparent"}`,
+                      borderLeft: `3px solid ${accent}`,
+                    }}
+                    onMouseEnter={e => { e.currentTarget.style.transform = "translateY(-1px)"; e.currentTarget.style.boxShadow = isDark ? "0 4px 12px rgba(0,0,0,0.35)" : "0 4px 12px rgba(0,0,0,0.1)" }}
+                    onMouseLeave={e => { e.currentTarget.style.transform = ""; e.currentTarget.style.boxShadow = "" }}
+                  >
+                    <span style={{ fontSize: 22, marginBottom: 4 }}>{trip.emoji}</span>
+                    <div style={{ fontSize: 12, fontWeight: 700, color: t.text, lineHeight: 1.2, marginBottom: 2 }}>{trip.name}</div>
+                    <div style={{ fontSize: 9, color: t.textSub, marginBottom: 5 }}>{trip.tag}</div>
+                    <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
+                      <span style={{ fontSize: 8, color: pillColor, background: pillBg, borderRadius: 4, padding: "1px 5px", border: isDark ? `0.5px solid ${t.border}` : "none" }}>{trip.days}</span>
+                      <span style={{ fontSize: 8, color: pillColor, background: pillBg, borderRadius: 4, padding: "1px 5px", border: isDark ? `0.5px solid ${t.border}` : "none" }}>{trip.season}</span>
+                    </div>
+                  </button>
+                )
+              })}
             </div>
             <div style={{ marginTop: 12, borderTop: `0.5px solid ${t.border}`, paddingTop: 10 }}>
               <label style={{ fontSize: 11, fontWeight: 600, color: t.textSub, display: "block", marginBottom: 6, textTransform: "uppercase", letterSpacing: "0.05em" }}>
@@ -3395,10 +3680,10 @@ function SmartPlannerPage() {
                 </div>
               </div>
               <button
-                onClick={() => { setDestination(""); setDebouncedDest(""); setAddedStops([]) }}
+                onClick={handleReset}
                 style={{ fontSize: 10, color: t.blue, background: "rgba(24,95,165,0.12)", border: "none", borderRadius: 5, padding: "3px 9px", cursor: "pointer" }}
               >
-                Change
+                ← Change
               </button>
             </div>
 
@@ -3881,6 +4166,13 @@ function SmartPlannerPage() {
         {/* Recommendation cards */}
         {(phase === "destinations" || phase === "planning" || phase === "itinerary") && (
           <div style={{ padding: "14px 20px 20px", flex: 1 }}>
+            {/* Back to destination selection */}
+            <button
+              onClick={handleReset}
+              style={{ display: "flex", alignItems: "center", gap: 5, marginBottom: 12, background: "none", border: "none", cursor: "pointer", color: t.textSub, fontSize: 11, padding: 0 }}
+            >
+              <span style={{ fontSize: 14 }}>←</span> Back to destination selection
+            </button>
             <div style={{ fontSize: 11, fontWeight: 600, color: t.textSub, marginBottom: 10, textTransform: "uppercase", letterSpacing: "0.05em" }}>
               {recommendations.length} destinations ranked by your model
             </div>
@@ -4036,22 +4328,27 @@ function SmartPlannerPage() {
       })()}
 
       {/* ── Right panel: always-visible large Google Map ──────────────────── */}
-      <div style={{ flex: 1, position: "relative", overflow: "hidden" }}>
+      <div style={{ flex: 1, position: "relative", overflow: "hidden", minHeight: isMobile ? 320 : undefined }}>
 
         {/* ── Full-height Google Map (always visible) ── */}
         <div style={{ position: "absolute", inset: 0 }}>
           <MapBoundary>
           {phase === "itinerary" && selected ? (
             <ItineraryMap dest={selected} itinerary={itinerary} activeDay={activeDay} from={from || "Kathmandu"} isDark={isDark} t={t} />
-          ) : mapDest ? (
+          ) : (mapDest || interestSites.length > 0) ? (
+            /* Show map whenever a destination is typed OR interests are selected.
+               When only interests selected (no destination), map shows Nepal overview
+               with interest-category pins — RouteMap skips the directions call automatically. */
             <RouteMap
               origin={(() => {
+                if (!mapDest) return ""   // no destination → Nepal overview, no route
                 const o = (from || "Kathmandu").trim()
                 if (/^-?\d+\.?\d*,\s*-?\d+\.?\d*$/.test(o)) return o
                 return o.toLowerCase().includes("nepal") ? o : `${o}, Nepal`
               })()}
               waypoints={addedStops.filter(Boolean)}
               pinLocations={addedStops.filter(Boolean)}
+              siteMarkers={interestSites}
               destination={mapDest}
               travelMode={travelMode}
               isDark={isDark} t={t}
@@ -4060,9 +4357,9 @@ function SmartPlannerPage() {
           ) : (
             <div style={{ width: "100%", height: "100%", background: t.subtle, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 14 }}>
               <div style={{ fontSize: 52 }}>🗺</div>
-              <div style={{ fontSize: 15, fontWeight: 600, color: t.textMid }}>Enter a destination to preview the route</div>
-              <div style={{ fontSize: 12, color: t.textFaint, maxWidth: 280, textAlign: "center", lineHeight: 1.6 }}>
-                Type your destination on the left — the map will show the route and popular stops along the way
+              <div style={{ fontSize: 15, fontWeight: 600, color: t.textMid }}>Explore Nepal</div>
+              <div style={{ fontSize: 12, color: t.textFaint, maxWidth: 300, textAlign: "center", lineHeight: 1.6 }}>
+                Select travel interests above to see matching sites across Nepal, or type a destination to preview your route
               </div>
             </div>
           )}
@@ -4207,6 +4504,19 @@ function SmartPlannerPage() {
 
       <style>{`
         @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+        /* ── Global mobile overrides ── */
+        @media (max-width: 768px) {
+          .rsp-grid-4  { grid-template-columns: 1fr 1fr !important; }
+          .rsp-grid-2  { grid-template-columns: 1fr !important; }
+          .rsp-stack   { flex-direction: column !important; }
+          .rsp-full    { max-width: 100% !important; padding: 16px !important; }
+          .rsp-hide    { display: none !important; }
+          .rsp-scroll  { overflow-x: auto !important; flex-wrap: nowrap !important; }
+          .rsp-h-auto  { height: auto !important; min-height: 0 !important; }
+          .rsp-w-full  { width: 100% !important; flex: 0 0 100% !important; min-width: 0 !important; }
+          .rsp-p-sm    { padding: 12px 14px !important; }
+          .rsp-text-sm { font-size: 11px !important; }
+        }
       `}</style>
     </div>
   )
@@ -4389,22 +4699,25 @@ function Sidebar({
 // ─── App ──────────────────────────────────────────────────────────────────────
 
 export default function App() {
-  const [activePage,   setActivePage]  = useState<Page>("dashboard")
-  const [mountedPages, setMountedPages] = useState<Set<Page>>(new Set<Page>(["dashboard"]))
-  const [collapsed,    setCollapsed]   = useState(false)
-  const [isDark,      setIsDark]      = useState(false)
-  const [pendingNav,  setPendingNav]  = useState<NavRequest | null>(null)
+  const [activePage,    setActivePage]   = useState<Page>("dashboard")
+  const [mountedPages,  setMountedPages]  = useState<Set<Page>>(new Set<Page>(["dashboard"]))
+  const [collapsed,     setCollapsed]    = useState(false)
+  const [isDark,        setIsDark]       = useState(false)
+  const [pendingNav,    setPendingNav]   = useState<NavRequest | null>(null)
+  const [drawerOpen,    setDrawerOpen]   = useState(false)
+  const isMobile = useIsMobile()
 
   const ctxValue: Ctx = {
     t: isDark ? dark : light,
-    isDark,
+    isDark, isMobile,
     toggleDark: () => setIsDark((d) => !d),
     pendingNav,
     clearNav:   () => setPendingNav(null),
     navigateTo: (page, nav) => {
       if (nav) setPendingNav(nav)
       setActivePage(page)
-      setMountedPages(prev => new Set([...prev, page]))  // keep-alive: mount once, never unmount
+      setMountedPages(prev => new Set([...prev, page]))
+      if (isMobile) setDrawerOpen(false)   // close nav drawer on mobile after navigation
     },
   }
 
@@ -4412,20 +4725,67 @@ export default function App() {
 
   return (
     <ThemeCtx.Provider value={ctxValue}>
-      <div style={{ display: "flex", height: "100vh", fontFamily: "'Inter', system-ui, sans-serif", background: t.pageBg, transition: "background 0.3s" }}>
-        <Sidebar
-          activePage={activePage}
-          setActivePage={setActivePage}
-          collapsed={collapsed}
-          setCollapsed={setCollapsed}
-        />
+      <div style={{ display: "flex", height: "100vh", fontFamily: "'Inter', system-ui, sans-serif", background: t.pageBg, transition: "background 0.3s", position: "relative", overflow: "hidden" }}>
+
+        {/* Mobile overlay backdrop */}
+        {isMobile && drawerOpen && (
+          <div
+            onClick={() => setDrawerOpen(false)}
+            style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.45)", zIndex: 299, backdropFilter: "blur(2px)" }}
+          />
+        )}
+
+        {/* Sidebar — fixed drawer on mobile, normal on desktop */}
+        <div style={{
+          position: isMobile ? "fixed" : "relative",
+          left: isMobile ? (drawerOpen ? 0 : -220) : 0,
+          top: 0, bottom: 0, zIndex: 300,
+          transition: isMobile ? "left 0.25s cubic-bezier(0.4,0,0.2,1)" : undefined,
+          flexShrink: 0,
+        }}>
+          <Sidebar
+            activePage={activePage}
+            setActivePage={setActivePage}
+            collapsed={isMobile ? false : collapsed}
+            setCollapsed={setCollapsed}
+          />
+        </div>
+
+        {/* Main content */}
         <main style={{
           flex: 1, overflowY: "auto", overflowX: "hidden",
-          // Centre content when sidebar is collapsed so it doesn't hug the left edge
           display: "flex", flexDirection: "column", alignItems: "center",
+          paddingTop: isMobile ? 52 : 0,   // room for mobile top bar
         }}>
-          {/* Keep-alive: pages mount once and stay mounted — state is preserved across navigation.
-              display:none hides the inactive page without unmounting it. */}
+
+          {/* Mobile top bar */}
+          {isMobile && (
+            <div style={{
+              position: "fixed", top: 0, left: 0, right: 0, zIndex: 298, height: 52,
+              background: t.surface, borderBottom: `0.5px solid ${t.border}`,
+              display: "flex", alignItems: "center", padding: "0 16px", gap: 12,
+            }}>
+              <button
+                onClick={() => setDrawerOpen(v => !v)}
+                style={{ width: 36, height: 36, borderRadius: 8, border: `0.5px solid ${t.border}`, background: t.subtle, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 18, flexShrink: 0 }}
+              >
+                ☰
+              </button>
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <div style={{ width: 26, height: 26, borderRadius: 6, background: t.blue, display: "flex", alignItems: "center", justifyContent: "center" }}>
+                  <Mountain size={14} color="#fff" />
+                </div>
+                <span style={{ fontSize: 14, fontWeight: 700, color: t.text }}>Gantabya</span>
+              </div>
+              <div style={{ marginLeft: "auto", display: "flex", gap: 8, alignItems: "center" }}>
+                <button onClick={() => setIsDark(d => !d)} style={{ width: 32, height: 32, borderRadius: 8, border: `0.5px solid ${t.border}`, background: t.subtle, cursor: "pointer", fontSize: 15, display: "flex", alignItems: "center", justifyContent: "center" }}>
+                  {isDark ? "☀️" : "🌙"}
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Page content — keep-alive pattern */}
           {(["dashboard", "pathfinder", "smart-planner", "nearby", "book"] as Page[]).map(page => (
             mountedPages.has(page) ? (
               <div
@@ -4434,7 +4794,6 @@ export default function App() {
                   width: "100%", flex: activePage === page ? 1 : undefined,
                   display: activePage === page ? "flex" : "none",
                   flexDirection: "column",
-                  // Full-height pages need height:100% to fill the main scroll area
                   height: (["smart-planner", "nearby", "book"] as Page[]).includes(page) && activePage === page ? "100%" : undefined,
                 }}
               >
