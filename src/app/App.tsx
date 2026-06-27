@@ -1311,7 +1311,21 @@ function PathfinderPage() {
   const updateStop = (i: number, v: string) => setStops(s => s.map((x, idx) => idx === i ? v : x))
 
   const canSearch = origin.trim().length > 0 && destination.trim().length > 0
-  const [searched, setSearched] = useState(false)
+  const [searched,   setSearched]   = useState(false)
+  const [locLoading, setLocLoading] = useState(false)
+
+  function fillMyLocation(setter: (v: string) => void) {
+    if (!navigator.geolocation) { alert("GPS not available on this device"); return }
+    setLocLoading(true)
+    navigator.geolocation.getCurrentPosition(
+      pos => {
+        setter(`${pos.coords.latitude.toFixed(6)},${pos.coords.longitude.toFixed(6)}`)
+        setLocLoading(false)
+      },
+      () => { alert("Could not get GPS location. Please allow location access."); setLocLoading(false) },
+      { enableHighAccuracy: true, timeout: 9000 }
+    )
+  }
 
   const mapsUrl = `https://www.google.com/maps/dir/?api=1` +
     `&origin=${encodeURIComponent(origin.trim() || "Kathmandu, Nepal")}` +
@@ -1342,10 +1356,28 @@ function PathfinderPage() {
 
         {/* Route builder */}
         <div style={{ padding: "14px 18px", borderBottom: `0.5px solid ${t.border}`, display: "flex", flexDirection: "column", gap: 8 }}>
-          {/* Origin */}
-          <div style={{ position: "relative" }}>
-            <div style={{ position: "absolute", left: 9, top: "50%", transform: "translateY(-50%)", width: 10, height: 10, borderRadius: "50%", background: t.blue, border: `2px solid ${t.surface}`, boxShadow: `0 0 0 2px ${t.blue}`, zIndex: 1 }} />
-            <input value={origin} onChange={e => setOrigin(e.target.value)} placeholder="Starting point" style={inp} />
+          {/* Origin + GPS button */}
+          <div style={{ display: "flex", gap: 7, alignItems: "center" }}>
+            <div style={{ position: "relative", flex: 1 }}>
+              <div style={{ position: "absolute", left: 9, top: "50%", transform: "translateY(-50%)", width: 10, height: 10, borderRadius: "50%", background: t.blue, border: `2px solid ${t.surface}`, boxShadow: `0 0 0 2px ${t.blue}`, zIndex: 1 }} />
+              <input value={origin} onChange={e => setOrigin(e.target.value)} placeholder="Starting point" style={inp} />
+            </div>
+            <button
+              onClick={() => fillMyLocation(setOrigin)}
+              disabled={locLoading}
+              title="Use my current GPS location as starting point"
+              style={{
+                height: 36, padding: "0 11px", borderRadius: 8, border: `0.5px solid ${t.blue}`,
+                background: t.blueLight, color: locLoading ? t.textFaint : t.blue,
+                fontSize: 11, fontWeight: 600, cursor: locLoading ? "default" : "pointer",
+                display: "flex", alignItems: "center", gap: 5, flexShrink: 0, whiteSpace: "nowrap",
+              }}
+            >
+              {locLoading
+                ? <Loader2 size={12} style={{ animation: "spin 1s linear infinite" }} />
+                : <span style={{ fontSize: 14 }}>📍</span>}
+              {locLoading ? "Detecting…" : "My location"}
+            </button>
           </div>
 
           {/* Connector line */}
@@ -3028,10 +3060,25 @@ function SmartPlannerPage() {
   const [debouncedDest,  setDebouncedDest]  = useState("")   // throttled version for map
   const [searchQuery,    setSearchQuery]    = useState("")   // free-text in Phase A (does NOT switch phase)
   const [from,           setFrom]           = useState("")   // starting point — empty by default
+  const [spLocLoading,   setSpLocLoading]   = useState(false)
+
+  function fillMyLocationSP() {
+    if (!navigator.geolocation) { alert("GPS not available on this device"); return }
+    setSpLocLoading(true)
+    navigator.geolocation.getCurrentPosition(
+      pos => {
+        setFrom(`${pos.coords.latitude.toFixed(6)},${pos.coords.longitude.toFixed(6)}`)
+        setSpLocLoading(false)
+      },
+      () => { alert("Could not get GPS location. Please allow location access."); setSpLocLoading(false) },
+      { enableHighAccuracy: true, timeout: 9000 }
+    )
+  }
   const [budget,         setBudget]         = useState(0)
   const [days,           setDays]           = useState(0)
   const [purposes,       setPurposes]       = useState<string[]>([])
   const [addedStops,     setAddedStops]     = useState<string[]>([])  // stops along the route
+  const [stopDraft,      setStopDraft]      = useState("")             // typing buffer for a new stop
   const [departureDate,  setDepartureDate]  = useState("")            // YYYY-MM-DD
   const [departureTime,  setDepartureTime]  = useState("")            // HH:MM
   const [showMapPicker,  setShowMapPicker]  = useState(false)   // map picker toggle
@@ -3176,6 +3223,7 @@ function SmartPlannerPage() {
     setDestination("")
     setFrom("")
     setAddedStops([])
+    setStopDraft("")
     setSearchQuery("")
     setDebouncedDest("")
     setDepartureDate("")
@@ -3426,10 +3474,93 @@ function SmartPlannerPage() {
             {/* ── Starting from (empty by default) ── */}
             <div>
               <label style={{ fontSize: 11, fontWeight: 600, color: t.textSub, display: "block", marginBottom: 5, textTransform: "uppercase", letterSpacing: "0.05em" }}>Starting from</label>
-              <div style={{ position: "relative" }}>
-                <MapPin size={13} style={{ position: "absolute", left: 9, top: "50%", transform: "translateY(-50%)", color: t.blue }} />
-                <input value={from} onChange={(e) => setFrom(e.target.value)} placeholder="Your city or location" style={inS} />
+              <div style={{ display: "flex", gap: 7, alignItems: "center" }}>
+                <div style={{ position: "relative", flex: 1 }}>
+                  <MapPin size={13} style={{ position: "absolute", left: 9, top: "50%", transform: "translateY(-50%)", color: t.blue }} />
+                  <input value={from} onChange={(e) => setFrom(e.target.value)} placeholder="Your city or location" style={inS} />
+                </div>
+                <button
+                  onClick={fillMyLocationSP}
+                  disabled={spLocLoading}
+                  title="Use my current GPS location"
+                  style={{
+                    height: 38, padding: "0 11px", borderRadius: 8, border: `0.5px solid ${t.blue}`,
+                    background: t.blueLight, color: spLocLoading ? t.textFaint : t.blue,
+                    fontSize: 11, fontWeight: 600, cursor: spLocLoading ? "default" : "pointer",
+                    display: "flex", alignItems: "center", gap: 5, flexShrink: 0, whiteSpace: "nowrap",
+                  }}
+                >
+                  {spLocLoading
+                    ? <Loader2 size={12} style={{ animation: "spin 1s linear infinite" }} />
+                    : <span style={{ fontSize: 14 }}>📍</span>}
+                  {spLocLoading ? "Detecting…" : "My location"}
+                </button>
               </div>
+            </div>
+
+            {/* ── Stops along the way ── */}
+            <div>
+              <label style={{ fontSize: 11, fontWeight: 600, color: t.textSub, display: "block", marginBottom: 5, textTransform: "uppercase", letterSpacing: "0.05em" }}>
+                Stops along the way
+                {addedStops.length > 0 && (
+                  <span style={{ marginLeft: 6, fontSize: 9, fontWeight: 700, color: t.blue, background: t.blueLight, borderRadius: 8, padding: "1px 6px" }}>
+                    {addedStops.length}
+                  </span>
+                )}
+              </label>
+
+              {/* Type & add a stop */}
+              <div style={{ display: "flex", gap: 6 }}>
+                <div style={{ position: "relative", flex: 1 }}>
+                  <MapPin size={12} style={{ position: "absolute", left: 9, top: "50%", transform: "translateY(-50%)", color: t.green }} />
+                  <input
+                    value={stopDraft}
+                    onChange={e => setStopDraft(e.target.value)}
+                    onKeyDown={e => {
+                      if (e.key === "Enter" && stopDraft.trim()) {
+                        setAddedStops(s => [...s, stopDraft.trim()])
+                        setStopDraft("")
+                      }
+                    }}
+                    placeholder="e.g. Bhaktapur, Dhulikhel…"
+                    style={{ ...inS, paddingLeft: 28 }}
+                  />
+                </div>
+                <button
+                  onClick={() => {
+                    if (!stopDraft.trim()) return
+                    setAddedStops(s => [...s, stopDraft.trim()])
+                    setStopDraft("")
+                  }}
+                  style={{ height: 38, padding: "0 13px", borderRadius: 8, border: "none", background: t.green, color: "#fff", fontSize: 12, fontWeight: 700, cursor: "pointer", flexShrink: 0 }}
+                >
+                  + Add
+                </button>
+              </div>
+
+              {/* Added stops list */}
+              {addedStops.length > 0 && (
+                <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 5 }}>
+                  {addedStops.map((stop, i) => (
+                    <div key={`sp-stop-${i}`} style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 10px", borderRadius: 8, background: t.greenLight, border: `0.5px solid ${t.green}30` }}>
+                      <div style={{ width: 6, height: 6, borderRadius: "50%", background: t.green, flexShrink: 0 }} />
+                      <span style={{ flex: 1, fontSize: 12, color: t.text, fontWeight: 500 }}>{stop}</span>
+                      <button
+                        onClick={() => setAddedStops(s => s.filter((_, idx) => idx !== i))}
+                        style={{ background: "none", border: "none", color: t.textFaint, cursor: "pointer", fontSize: 16, lineHeight: 1, padding: "0 2px" }}
+                      >
+                        ×
+                      </button>
+                    </div>
+                  ))}
+                  <button
+                    onClick={() => setAddedStops([])}
+                    style={{ fontSize: 10, color: t.textFaint, background: "transparent", border: "none", cursor: "pointer", textAlign: "left", padding: 0 }}
+                  >
+                    Clear all stops
+                  </button>
+                </div>
+              )}
             </div>
 
             {/* ── Departure date + time ── */}
