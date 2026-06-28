@@ -225,9 +225,8 @@ The project emphasizes
 | Member |
 |----------|
 | Rajwol Kumar Shrestha |
-| Abhishek Shrestha |
-| Nirjala Duwal |
-| Prajina Prajapati |
+| Rajwol Shrestha |
+| Prem Prasad Devkota |
 
 ---
 
