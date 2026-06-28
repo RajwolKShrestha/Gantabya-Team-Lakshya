@@ -1,4 +1,3 @@
-````markdown
 <div align="center">
 
 # 🌍 Gantabya
@@ -221,7 +220,7 @@ The project emphasizes
 
 ---
 
-# 👨‍💻 Team Lakshya
+# 👨💻 Team Lakshya
 
 | Member |
 |----------|
@@ -265,4 +264,3 @@ If you like this project,
 **Happy Exploring! 🌍**
 
 </div>
-````
