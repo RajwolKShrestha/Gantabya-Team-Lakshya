@@ -1876,41 +1876,60 @@ function NearbyPage() {
   const siteMarkers = useRef<any[]>([])
   const infoWin    = useRef<any>(null)
 
-  // ── 1. Get GPS location ───────────────────────────────────────────────────
-  useEffect(() => {
+  // ── 1. Get GPS location (watchPosition for mobile reliability) ────────────
+  const watchIdRef = useRef<number | null>(null)
+
+  function startGPS() {
     if (!navigator.geolocation) {
-      const fallback = { lat: 27.7172, lng: 85.3240 }  // Kathmandu
-      setUserCoords(fallback)
-      setGpsStatus("denied")
-      setUserLoc(detectNepalZone(fallback.lat, fallback.lng))
-      return
+      setGpsStatus("denied"); return
     }
-    navigator.geolocation.getCurrentPosition(
+    setGpsStatus("requesting")
+    // Clear any previous watch
+    if (watchIdRef.current !== null) navigator.geolocation.clearWatch(watchIdRef.current)
+
+    watchIdRef.current = navigator.geolocation.watchPosition(
       pos => {
         const c = { lat: pos.coords.latitude, lng: pos.coords.longitude }
         setUserCoords(c)
         setGpsStatus("granted")
         setUserLoc(detectNepalZone(c.lat, c.lng))
+        // Stop watching after first good fix to save battery
+        if (watchIdRef.current !== null) {
+          navigator.geolocation.clearWatch(watchIdRef.current)
+          watchIdRef.current = null
+        }
       },
-      () => {
-        const fallback = { lat: 27.7172, lng: 85.3240 }
-        setUserCoords(fallback)
+      (err) => {
+        // Code 1 = permission denied (also fires when iframe blocks geolocation via Permissions Policy).
+        // Suppress the noisy console line; surface it in the UI instead.
+        if (err.code !== 3) {} // only log timeouts
         setGpsStatus("denied")
-        setUserLoc(detectNepalZone(fallback.lat, fallback.lng))
       },
-      { enableHighAccuracy: true, timeout: 9000, maximumAge: 0 }
+      {
+        enableHighAccuracy: true,
+        timeout: 20000,      // 20 s — mobile GPS can be slow
+        maximumAge: 60000,   // accept cached fix up to 1 min old
+      }
     )
+  }
+
+  useEffect(() => {
+    startGPS()
+    return () => {
+      if (watchIdRef.current !== null) navigator.geolocation.clearWatch(watchIdRef.current)
+    }
   }, [])
 
   // ── 2. Build map & markers when coords ready or radius changes ────────────
   useEffect(() => {
-    if (!userCoords || !mapDivRef.current) return
-    loadGMaps(initMap)
+    if (!mapDivRef.current) return
+    // Use real coords when available, Nepal center as visual placeholder otherwise
+    const coords = userCoords ?? { lat: 28.1, lng: 84.1 }
+    loadGMaps(() => initMap(coords))
   }, [userCoords, radius, isDark])
 
-  function initMap() {
+  function initMap(center = userCoords ?? { lat: 28.1, lng: 84.1 }) {
     const g = (window as any).google.maps
-    const center = userCoords!
 
     // Create or reuse map
     if (!mapObj.current) {
@@ -2027,13 +2046,34 @@ function NearbyPage() {
               flexShrink:0, boxShadow:`0 0 0 3px ${gpsStatus === "granted" ? "rgba(34,197,94,0.2)" : gpsStatus === "denied" ? "rgba(239,68,68,0.2)" : "rgba(245,158,11,0.2)"}`,
             }} />
             <span style={{ fontSize:11, fontWeight:600, color:"#111827" }}>
-              {gpsStatus === "requesting" ? "Detecting your GPS…" :
-               gpsStatus === "denied"    ? `Location unavailable · Kathmandu (approx.)` :
+              {gpsStatus === "requesting" ? "Detecting location…" :
+               gpsStatus === "denied"    ? "Location access denied" :
                `Live GPS · ${userLoc.district}`}
             </span>
           </div>
-          {gpsStatus !== "requesting" && (
+          {gpsStatus === "granted" && (
             <div style={{ fontSize:9, color:"#9CA3AF", marginTop:2, paddingLeft:13 }}>{userLoc.province}</div>
+          )}
+          {gpsStatus === "denied" && (
+            <div style={{ marginTop:6 }}>
+              <div style={{ fontSize:9, color:"#EF4444", marginBottom:5 }}>
+                GPS blocked — pick your city to continue:
+              </div>
+              <div style={{ display:"flex", flexWrap:"wrap", gap:4 }}>
+                {NEPAL_CITY_PICKS.slice(0, 8).map(city => (
+                  <button key={city.label} onClick={() => {
+                    setUserCoords({ lat: city.lat, lng: city.lng })
+                    setGpsStatus("granted")
+                    setUserLoc(detectNepalZone(city.lat, city.lng))
+                  }} style={{ fontSize:9, fontWeight:600, color:"#185FA5", background:"#EBF2FB", border:"0.5px solid #185FA5", borderRadius:4, padding:"3px 8px", cursor:"pointer" }}>
+                    {city.label}
+                  </button>
+                ))}
+                <button onClick={startGPS} style={{ fontSize:9, fontWeight:600, color:"#6B7280", background:"#F3F4F6", border:"0.5px solid #E5E7EB", borderRadius:4, padding:"3px 8px", cursor:"pointer" }}>
+                  Retry GPS
+                </button>
+              </div>
+            </div>
           )}
         </div>
 
@@ -2249,32 +2289,37 @@ function BookingPage() {
   const mapObj     = useRef<any>(null)
   const markersRef = useRef<any[]>([])
 
-  // ── 1. Get GPS ────────────────────────────────────────────────────────────
-  useEffect(() => {
-    const fallback = { lat: 27.7172, lng: 85.3240 }
-    if (!navigator.geolocation) {
-      setUserCoords(fallback); setGpsStatus("denied")
-      setUserLoc(detectNepalZone(fallback.lat, fallback.lng)); return
-    }
-    navigator.geolocation.getCurrentPosition(
+  // ── 1. Get GPS (watchPosition for mobile reliability) ─────────────────────
+  const bkWatchRef = useRef<number | null>(null)
+
+  function startBookingGPS() {
+    if (!navigator.geolocation) { setGpsStatus("denied"); return }
+    setGpsStatus("requesting")
+    if (bkWatchRef.current !== null) navigator.geolocation.clearWatch(bkWatchRef.current)
+    bkWatchRef.current = navigator.geolocation.watchPosition(
       pos => {
         const c = { lat: pos.coords.latitude, lng: pos.coords.longitude }
         setUserCoords(c); setGpsStatus("granted")
         setUserLoc(detectNepalZone(c.lat, c.lng))
+        if (bkWatchRef.current !== null) { navigator.geolocation.clearWatch(bkWatchRef.current); bkWatchRef.current = null }
       },
-      () => {
-        setUserCoords(fallback); setGpsStatus("denied")
-        setUserLoc(detectNepalZone(fallback.lat, fallback.lng))
+      (err) => {
+        setGpsStatus("denied")
       },
-      { enableHighAccuracy: true, timeout: 9000, maximumAge: 0 }
+      { enableHighAccuracy: true, timeout: 20000, maximumAge: 60000 }
     )
+  }
+
+  useEffect(() => {
+    startBookingGPS()
+    return () => { if (bkWatchRef.current !== null) navigator.geolocation.clearWatch(bkWatchRef.current) }
   }, [])
 
-  // ── 2. Search Places API when coords ready or tab changes ─────────────────
+  // ── 2. Search Places API when real coords arrive or tab changes ─────────────
   useEffect(() => {
-    if (!userCoords || !hiddenRef.current) return
+    if (!userCoords || gpsStatus !== "granted" || !hiddenRef.current) return
     loadGMaps(() => searchNearby(userCoords))
-  }, [userCoords, activeTab])
+  }, [userCoords, activeTab, gpsStatus])
 
   function searchNearby(coords: {lat:number;lng:number}) {
     const g = (window as any).google.maps
@@ -2408,9 +2453,26 @@ function BookingPage() {
                   background: gpsStatus==="granted" ? "#22C55E" : gpsStatus==="denied" ? "#EF4444" : "#F59E0B",
                   flexShrink:0 }} />
                 {gpsStatus==="requesting" ? "Detecting your location…" :
-                 gpsStatus==="denied"     ? `Location unavailable · Showing Kathmandu` :
+                 gpsStatus==="denied"     ? "Location access denied" :
                  `Near ${userLoc.area}, ${userLoc.district}`}
               </div>
+              {gpsStatus==="denied" && (
+                <div style={{ marginTop:6 }}>
+                  <div style={{ fontSize:9, color:t.orange, marginBottom:5 }}>GPS blocked — pick your city:</div>
+                  <div style={{ display:"flex", flexWrap:"wrap", gap:4 }}>
+                    {NEPAL_CITY_PICKS.slice(0, 6).map(city => (
+                      <button key={city.label} onClick={() => {
+                        setUserCoords({ lat:city.lat, lng:city.lng })
+                        setGpsStatus("granted")
+                        setUserLoc(detectNepalZone(city.lat, city.lng))
+                      }} style={{ fontSize:9, fontWeight:600, color:t.blue, background:t.blueLight, border:`0.5px solid ${t.blue}`, borderRadius:4, padding:"3px 8px", cursor:"pointer" }}>
+                        {city.label}
+                      </button>
+                    ))}
+                    <button onClick={startBookingGPS} style={{ fontSize:9, fontWeight:600, color:t.textSub, background:t.subtle, border:`0.5px solid ${t.border}`, borderRadius:4, padding:"3px 8px", cursor:"pointer" }}>Retry GPS</button>
+                  </div>
+                </div>
+              )}
             </div>
             <div style={{ fontSize:12, color:t.textFaint }}>
               {loading ? "Searching…" : `${places.length} places found`}
@@ -2625,6 +2687,22 @@ function BookingPage() {
 // ── Local mock fallbacks (used when both Flask backend and Supabase are offline) ─
 
 // Detect which Nepal province the destination belongs to
+// Major Nepal cities with coordinates — used as manual location fallback
+const NEPAL_CITY_PICKS = [
+  { label: "Kathmandu",   lat: 27.7172, lng: 85.3240 },
+  { label: "Pokhara",     lat: 28.2096, lng: 83.9856 },
+  { label: "Lalitpur",    lat: 27.6644, lng: 85.3188 },
+  { label: "Bhaktapur",   lat: 27.6710, lng: 85.4298 },
+  { label: "Biratnagar",  lat: 26.4525, lng: 87.2718 },
+  { label: "Dharan",      lat: 26.8127, lng: 87.2840 },
+  { label: "Butwal",      lat: 27.7006, lng: 83.4481 },
+  { label: "Bharatpur",   lat: 27.6833, lng: 84.4333 },
+  { label: "Janakpur",    lat: 26.7286, lng: 85.9243 },
+  { label: "Nepalgunj",   lat: 28.0500, lng: 81.6167 },
+  { label: "Dhangadhi",   lat: 28.6963, lng: 80.5997 },
+  { label: "Hetauda",     lat: 27.4167, lng: 85.0333 },
+]
+
 function detectDestinationProvince(dest: string): string | null {
   const d = dest.toLowerCase()
   if (/kathmandu|patan|lalitpur|bhaktapur|bagmati|namobuddha|dhulikhel|nagarkot|boudha|swayambhu|pashupatinath|changu/.test(d)) return "Bagmati"
